@@ -1,0 +1,666 @@
+﻿// handleRefresh.js - Xá»­ lÃ½ Anti-Change cho cÃ¡c event
+const fs = require("fs");
+const path = require("path");
+const moment = require("moment-timezone");
+
+const antiSettingsPath = path.resolve(__dirname, '../data/antiSettings.json');
+
+function sendAntiMessage(api, message, threadID) {
+    api.sendMessage(message, threadID, (err, messageInfo) => {
+        if (err) {
+            console.error("[Anti] Lá»—i gá»­i tin nháº¯n:", err);
+            return;
+        }
+
+        if (messageInfo && messageInfo.messageID) {
+            setTimeout(() => {
+                //console.log("[Anti] Äang unsend messageID:", messageInfo.messageID);
+                api.unsendMessage(messageInfo.messageID, (unsendErr) => {
+                    if (unsendErr) {
+                        //console.error("[Anti] âœ— Lá»—i unsend:", unsendErr);
+                    } else {
+                        //console.log("[Anti] âœ“ Unsend thÃ nh cÃ´ng!");
+                    }
+                });
+            }, 5000);
+        }
+    });
+}
+
+function loadAntiSettings() {
+    try {
+        if (!fs.existsSync(antiSettingsPath)) {
+            fs.writeFileSync(antiSettingsPath, JSON.stringify({ threads: {} }, null, 2));
+        }
+        return JSON.parse(fs.readFileSync(antiSettingsPath, 'utf8'));
+    } catch (error) {
+        console.error("Error loading anti settings:", error);
+        return { threads: {} };
+    }
+}
+
+function saveAntiSettings(data) {
+    try {
+        fs.writeFileSync(antiSettingsPath, JSON.stringify(data, null, 2), 'utf8');
+        return true;
+    } catch (error) {
+        console.error("Error saving anti settings:", error);
+        return false;
+    }
+}
+
+async function getThreadData(api, threadID) {
+    try {
+        const threadInfo = await api.getThreadInfo(threadID);
+        const data = {
+            threadName: threadInfo.threadName || threadInfo.name,
+            emoji: threadInfo.emoji || "\u{1F44D}",
+            themeColor: threadInfo.color,
+            themeId: threadInfo.threadThemeId || null,
+            imageSrc: threadInfo.imageSrc,
+            nicknames: threadInfo.nicknames || {},
+            adminIDs: (threadInfo.adminIDs || []).map(a => a.id || a),
+            timestamp: Date.now()
+        };
+        return data;
+    } catch (error) {
+        console.error("Error getting thread data:", error);
+        return null;
+    }
+}
+
+function updateThreadDataInSettings(antiSettings, threadID, field, value) {
+    if (!antiSettings.threads[threadID]) {
+        antiSettings.threads[threadID] = {
+            enabled: false,
+            antiName: false,
+            antiColor: false,
+            antiEmoji: false,
+            antiNickname: false,
+            antiImage: false,
+            allowGroupAdmin: false,
+            data: {}
+        };
+    }
+
+    if (!antiSettings.threads[threadID].data) {
+        antiSettings.threads[threadID].data = {};
+    }
+
+    antiSettings.threads[threadID].data[field] = value;
+    antiSettings.threads[threadID].data.lastUpdate = Date.now();
+}
+
+module.exports = function ({ api }) {
+    return async function handleRefresh({ event }) {
+        try {
+            const { threadID, logMessageType, logMessageData, author, messageID } = event;
+
+            if (!threadID || !logMessageType) return;
+
+            const antiSettings = loadAntiSettings();
+            let threadSettings = antiSettings.threads[threadID];
+            if (!threadSettings) {
+                antiSettings.threads[threadID] = {
+                    enabled: false,
+                    antiName: false,
+                    antiColor: false,
+                    antiEmoji: false,
+                    antiNickname: false,
+                    antiImage: false,
+                    allowGroupAdmin: false,
+                    data: {}
+                };
+                threadSettings = antiSettings.threads[threadID];
+                saveAntiSettings(antiSettings);
+            }
+
+            const savedData = threadSettings.data || (threadSettings.data = {});
+            const { ADMINBOT = [], NDH = [] } = global.config;
+            const isAdminBot = ADMINBOT.includes(String(author)) || NDH.includes(String(author));
+
+            const threadInfo = await api.getThreadInfo(threadID);
+            if (!threadSettings.data || Object.keys(threadSettings.data).length === 0) {
+                const data = {
+                    threadName: threadInfo.threadName || threadInfo.name,
+                    emoji: threadInfo.emoji || "\u{1F44D}",
+                    themeColor: threadInfo.color,
+                    themeId: threadInfo.threadThemeId || null,
+                    imageSrc: threadInfo.imageSrc,
+                    nicknames: threadInfo.nicknames || {},
+                    adminIDs: (threadInfo.adminIDs || []).map(a => a.id || a),
+                    timestamp: Date.now()
+                };
+                Object.assign(threadSettings.data, data);
+                saveAntiSettings(antiSettings);
+            }
+            const threadAdmins = (threadInfo.adminIDs || []).map(a => {
+                if (typeof a === 'object' && a.id) return String(a.id);
+                return String(a);
+            });
+            const isGroupAdmin = threadAdmins.includes(String(author));
+
+            const isAntiAdmin = logMessageType === "log:thread-admins" && threadSettings.enabled && threadSettings.antiAdmin;
+
+            if (!isAntiAdmin) {
+                if (isAdminBot) {
+                    updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData);
+                    return;
+                }
+
+                if (isGroupAdmin) {
+                    updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData);
+                    return;
+                }
+            }
+
+            const time = moment.tz("Asia/Ho_Chi_Minh").format("HH:mm:ss DD/MM/YYYY");
+
+            switch (logMessageType) {
+                case "log:subscribe": {
+                    if (!threadSettings.enabled || !threadSettings.antiJoin) break;
+
+                    if (!logMessageData || !logMessageData.addedParticipants) break;
+                    if (isAdminBot || isGroupAdmin) break;
+
+                    const addedParticipants = logMessageData.addedParticipants;
+                    const botID = api.getCurrentUserID();
+
+                    for (const participant of addedParticipants) {
+                        const userID = participant.userFbId;
+
+                        if (userID === botID) continue;
+
+                        try {
+                            api.removeFromGroup(userID, threadID);
+                            console.log(`[Anti Join] ÄÃ£ kick ${userID} khá»i nhÃ³m ${threadID}`);
+                        } catch (kickErr) {
+                            console.error(`[Anti Join] Lá»—i kick ${userID}:`, kickErr);
+                        }
+                    }
+
+                    if (author !== botID) {
+                        const adderUser = threadInfo.userInfo.find(u => u.id === author);
+                        const adderName = adderUser ? adderUser.name : "Ai Ä‘Ã³";
+
+                        sendAntiMessage(
+                            api,
+                            `⚠️ ANTI JOIN - CHẶN THÊM THÀNH VIÊN\n\n` +
+                            `Người thêm: ${adderName}\n` +
+                            `ID: ${author}\n` +
+                            `Số người bị kick: ${addedParticipants.filter(p => p.userFbId !== botID).length}\n` +
+                            `Thời gian: ${time}\n\n` +
+                            `Đã kick tất cả!\n` +
+                            `Chỉ QTV/Admin mới được thêm thành viên!`,
+                            threadID
+                        );
+                    }
+                    break;
+                }
+
+                case "log:unsubscribe": {
+                    if (!threadSettings.enabled || !threadSettings.antiLeave) break;
+
+                    if (!logMessageData || !logMessageData.leftParticipantFbId) break;
+
+                    const leftUserID = String(logMessageData.leftParticipantFbId);
+                    const isSelfLeave = String(author) === leftUserID;
+                    const botID = api.getCurrentUserID();
+
+                    if (!isSelfLeave || leftUserID === botID) break;
+                    const isUserGroupAdmin = threadAdmins.includes(leftUserID);
+                    const isUserBotAdmin = ADMINBOT.includes(leftUserID) || NDH.includes(leftUserID);
+                    if (isUserBotAdmin || isUserGroupAdmin) break;
+                    try {
+                        api.addToGroup(leftUserID, threadID);
+                        console.log(`[Anti Leave] Đã thêm lại ${leftUserID} vào nhóm ${threadID}`);
+
+                        const leftUser = threadInfo.userInfo.find(u => u.id === leftUserID);
+                        const leftUserName = leftUser ? leftUser.name : "Thành viên";
+
+                        sendAntiMessage(
+                            api,
+                            `⚠️ ANTI LEAVE - CHẶN TỰ RỜI NHÓM\n\n` +
+                            `Người tự rời: ${leftUserName}\n` +
+                            `ID: ${leftUserID}\n` +
+                            `Thời gian: ${time}\n\n` +
+                            `Đã thêm lại vào nhóm!\n` +
+                            `Không được phép tự ý rời nhóm!`,
+                            threadID
+                        );
+                    } catch (addErr) {
+                        console.error(`[Anti Leave] Lá»—i thÃªm láº¡i ${leftUserID}:`, addErr);
+
+                        const leftUser = threadInfo.userInfo.find(u => u.id === leftUserID);
+                        const leftUserName = leftUser ? leftUser.name : "ThÃ nh viÃªn";
+
+                        sendAntiMessage(
+                            api,
+                            `⚠️ ANTI LEAVE - CHẶN TỰ RỜI NHÓM\n\n` +
+                            `Người tự rời: ${leftUserName}\n` +
+                            `ID: ${leftUserID}\n` +
+                            `Thời gian: ${time}\n\n` +
+                            `Không thể thêm lại (có thể đã chặn bot)`,
+                            threadID
+                        );
+                    }
+                    break;
+                }
+
+                case "log:thread-name": {
+                    if (!threadSettings.enabled || !threadSettings.antiName) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'threadName', logMessageData.name);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+                    if (isAdminBot || isGroupAdmin) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'threadName', logMessageData.name);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+
+                    const oldName = savedData.threadName;
+                    const newName = logMessageData.name;
+
+                    if (oldName && newName !== oldName) {
+                        api.gcname(oldName, threadID);
+                        if (author !== api.getCurrentUserID()) {
+                            const user = threadInfo.userInfo.find(u => u.id === author);
+                            const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+                            sendAntiMessage(
+                                api,
+                                `⚠️ ANTI NAME - CHẶN ĐỔI TÊN NHÓM\n\n` +
+                                `Người đổi: ${userName}\n` +
+                                `ID: ${author}\n` +
+                                `Tên mới: "${newName}"\n` +
+                                `Thời gian: ${time}\n\n` +
+                                `Đã khôi phục về: "${oldName}"\n` +
+                                `Chỉ QTV/Admin mới được đổi tên!`,
+                                threadID
+                            );
+                        }
+                    }
+                    break;
+                }
+
+                case "log:thread-color": {
+                    if (!threadSettings.enabled || !threadSettings.antiColor) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'themeColor', logMessageData.theme_color);
+                        updateThreadDataInSettings(antiSettings, threadID, 'themeId', logMessageData.theme_id);
+                        updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', logMessageData.accessibility_label);
+                        saveAntiSettings(antiSettings);
+                        //console.log(`[Anti] âœ“ Updated theme data (Anti OFF) - ID: ${logMessageData.theme_id}, Color: ${logMessageData.theme_color}`);
+                        break;
+                    }
+                    const oldThemeId = savedData.themeId;
+                    const newThemeId = logMessageData.theme_id;
+                    if (oldThemeId && newThemeId !== oldThemeId) {
+                        if (isAdminBot || isGroupAdmin) {
+                            updateThreadDataInSettings(antiSettings, threadID, 'themeColor', logMessageData.theme_color);
+                            updateThreadDataInSettings(antiSettings, threadID, 'themeId', logMessageData.theme_id);
+                            updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', logMessageData.accessibility_label);
+                            saveAntiSettings(antiSettings);
+                            break;
+                        }
+                        api.changeThreadColor(oldThemeId, threadID);
+
+                        if (author !== api.getCurrentUserID()) {
+                            const user = threadInfo.userInfo.find(u => u.id === author);
+                            const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+                            const oldThemeName = savedData.accessibility_label || "theme cÅ©";
+                            const newThemeName = logMessageData.accessibility_label || "theme má»›i";
+
+                            sendAntiMessage(
+                                api,
+                                `⚠️ ANTI COLOR - CHẶN ĐỔI THEME\n\n` +
+                                `Người đổi: ${userName}\n` +
+                                `ID: ${author}\n` +
+                                `Theme mới: ${newThemeName}\n` +
+                                `Thời gian: ${time}\n\n` +
+                                `Đã khôi phục về theme: ${oldThemeName}\n` +
+                                `Chỉ QTV/Admin mới được đổi màu!`,
+                                threadID
+                            );
+
+                        }
+                    } else {
+                        console.log(`[Anti Color]   No changes detected or no old theme saved`);
+                    }
+                    break;
+                }
+
+                case "log:thread-icon": {
+                    const defaultEmoji = "\u{1F44D}";
+                    const latestEmoji =
+                        logMessageData.thread_icon ||
+                        logMessageData.thread_quick_reaction_emoji ||
+                        logMessageData.custom_emoji ||
+                        threadInfo.emoji ||
+                        defaultEmoji;
+                    const latestEmojiUrl =
+                        logMessageData.thread_quick_reaction_emoji_url ||
+                        logMessageData.thread_icon_url ||
+                        null;
+                    const storedEmoji = savedData.emoji || defaultEmoji;
+
+                    const persistEmoji = (emojiValue) => {
+                        updateThreadDataInSettings(antiSettings, threadID, "emoji", emojiValue);
+                        savedData.emoji = emojiValue;
+                        if (latestEmojiUrl) {
+                            updateThreadDataInSettings(antiSettings, threadID, "emojiUrl", latestEmojiUrl);
+                            savedData.emojiUrl = latestEmojiUrl;
+                        }
+                        saveAntiSettings(antiSettings);
+                    };
+
+                    if (!threadSettings.enabled || !threadSettings.antiEmoji) {
+                        if (!savedData.emoji || storedEmoji !== latestEmoji) {
+                            persistEmoji(latestEmoji);
+                        }
+                        break;
+                    }
+
+                    if (isAdminBot || isGroupAdmin) {
+                        if (storedEmoji !== latestEmoji) {
+                            persistEmoji(latestEmoji);
+                        }
+                        break;
+                    }
+
+                    if (!savedData.emoji) {
+                        persistEmoji(latestEmoji);
+                        break;
+                    }
+
+                    const revertEmoji = savedData.emoji || defaultEmoji;
+
+                    if (latestEmoji !== revertEmoji) {
+                        api.emojiMqtt(revertEmoji, threadID);
+
+                        if (author !== api.getCurrentUserID()) {
+                            const user = threadInfo.userInfo.find(u => u.id === author);
+                            const userName = user ? user.name : "Unknown user";
+                            sendAntiMessage(
+                                api,
+                                "[Anti Emoji] Blocked emoji change\n\n" +
+                                "User: " + userName + "\n" +
+                                "ID: " + author + "\n" +
+                                "Attempted: " + latestEmoji + "\n" +
+                                "Time: " + time + "\n\n" +
+                                "Restored to: " + revertEmoji + "\n" +
+                                "Only admins can change the emoji.",
+                                threadID
+                            );
+                        }
+                    }
+                    break;
+                }
+
+                case "log:user-nickname": {
+                    const participant_id = String(logMessageData.participant_id);
+                    const newNickname = logMessageData.nickname || null;
+
+                    if (!threadSettings.enabled || !threadSettings.antiNickname) {
+                        if (!savedData.nicknames) savedData.nicknames = {};
+                        savedData.nicknames[participant_id] = newNickname;
+                        updateThreadDataInSettings(antiSettings, threadID, 'nicknames', savedData.nicknames);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+                    if (isAdminBot || isGroupAdmin) {
+                        if (!savedData.nicknames) savedData.nicknames = {};
+                        savedData.nicknames[participant_id] = newNickname;
+                        updateThreadDataInSettings(antiSettings, threadID, 'nicknames', savedData.nicknames);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+
+                    const oldNickname = savedData.nicknames ? savedData.nicknames[participant_id] : null;
+                    if (oldNickname !== newNickname && author !== api.getCurrentUserID()) {
+                        try {
+                            api.setNickname(oldNickname || "", threadID, participant_id);
+
+                            const authorUser = threadInfo.userInfo.find(u => u.id === author);
+                            const userName = authorUser ? authorUser.name : "NgÆ°á» i dÃ¹ng";
+                            const targetUser = threadInfo.userInfo.find(u => u.id === participant_id);
+                            const targetUserName = targetUser ? targetUser.name : "NgÆ°á» i dÃ¹ng";
+
+                            sendAntiMessage(
+                                api,
+                                `⚠️ ANTI NICKNAME - CHẶN ĐỔI BIỆT DANH\n\n` +
+                                `Người đổi: ${userName}\n` +
+                                `ID: ${author}\n` +
+                                `Đối tượng: ${targetUserName}\n` +
+                                `Thời gian: ${time}\n\n` +
+                                `Đã khôi phục biệt danh cũ!\n` +
+                                `Chỉ QTV/Admin mới được đổi biệt danh!`,
+                                threadID
+                            );
+                        } catch (err) {
+                            console.error(`[Anti Nickname] Lỗi khôi phục nickname:`, err);
+                        }
+                    }
+                    break;
+                }
+
+                case "log:thread-image": {
+                    if (!threadSettings.enabled || !threadSettings.antiImage) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'imageSrc', logMessageData.url);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+                    if (isAdminBot || isGroupAdmin) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'imageSrc', logMessageData.url);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+
+                    const oldImageSrc = savedData.imageSrc;
+
+                    if (oldImageSrc && author !== api.getCurrentUserID()) {
+                        try {
+                            const user = threadInfo.userInfo.find(u => u.id === author);
+                            const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+                            const axios = require('axios');
+                            const imageResponse = await axios.get(oldImageSrc, { responseType: 'stream' });
+                            api.changeGroupImage(oldImageSrc, threadID);
+
+                            sendAntiMessage(
+                                api,
+                                `⚠️ ANTI IMAGE - CHẶN ĐỔI ẢNH NHÓM\n\n` +
+                                `Người đổi: ${userName}\n` +
+                                `ID: ${author}\n` +
+                                `Thời gian: ${time}\n\n` +
+                                `Đã khôi phục ảnh cũ!\n` +
+                                `Chỉ QTV/Admin mới được đổi ảnh nhóm!`,
+                                threadID
+                            );
+                        } catch (error) {
+                            console.error("Error restoring group image:", error);
+                            sendAntiMessage(
+                                api,
+                                `⚠️ ANTI IMAGE - CHẶN ĐỔI ẢNH NHÓM\n\n` +
+                                `Không thể khôi phục ảnh nhóm tự động.\n` +
+                                `Vui lòng admin đổi lại!`,
+                                threadID
+                            );
+                        }
+                    }
+                    break;
+                }
+
+                case "log:thread-admins": {
+                    if (!threadSettings.enabled || !threadSettings.antiAdmin) {
+                        const currentAdmins = (threadInfo.adminIDs || []).map(a => String(a.id || a));
+                        updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdmins);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+
+                    const oldAdminIDs = savedData.adminIDs || [];
+                    const currentAdminIDs = (threadInfo.adminIDs || []).map(a => String(a.id || a));
+                    if (!savedData.adminIDs || oldAdminIDs.length === 0) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdminIDs);
+                        saveAntiSettings(antiSettings);
+                        console.log(`[Anti Admin] Đã lưu trạng thái QTV ban đầu cho nhóm ${threadID}`);
+                        break;
+                    }
+
+                    const addedAdmins = currentAdminIDs.filter(id => !oldAdminIDs.includes(id));
+                    const removedAdmins = oldAdminIDs.filter(id => !currentAdminIDs.includes(id));
+
+                    if (addedAdmins.length > 0 || removedAdmins.length > 0) {
+                        try {
+                            const violatorID = String(author);
+                            const isViolatorAdmin = oldAdminIDs.includes(violatorID);
+                            const isViolatorBotAdmin = ADMINBOT.includes(violatorID) || NDH.includes(violatorID);
+
+                            let violatorWasDemoted = false;
+                            if (isViolatorAdmin && !isViolatorBotAdmin && violatorID !== api.getCurrentUserID()) {
+                                try {
+                                    api.changeAdminStatus(threadID, violatorID, false);
+                                    violatorWasDemoted = true;
+                                } catch (demoteErr) {
+                                    console.error(`[Anti Admin] Lá»—i gá»¡ QTV ngÆ°á»i vi pháº¡m:`, demoteErr);
+                                }
+                            }
+                            for (const adminID of addedAdmins) {
+                                if (violatorWasDemoted && adminID === violatorID) {
+                                    continue;
+                                }
+                                api.changeAdminStatus(threadID, adminID, false);
+                            }
+
+                            for (const adminID of removedAdmins) {
+                                if (violatorWasDemoted && adminID === violatorID) {
+                                    continue;
+                                }
+                                api.changeAdminStatus(threadID, adminID, true);
+                            }
+
+                            let finalAdminIDs = [...oldAdminIDs];
+                            if (violatorWasDemoted) {
+                                finalAdminIDs = finalAdminIDs.filter(id => id !== violatorID);
+
+                            }
+                            updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', finalAdminIDs);
+                            saveAntiSettings(antiSettings);
+
+                            if (author !== api.getCurrentUserID()) {
+                                const user = threadInfo.userInfo.find(u => u.id === author);
+                                const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+
+                                let changeDesc = "";
+                                if (addedAdmins.length > 0) {
+                                    changeDesc += `thÃªm ${addedAdmins.length} QTV`;
+                                }
+                                if (removedAdmins.length > 0) {
+                                    if (changeDesc) changeDesc += " vÃ  ";
+                                    changeDesc += `xÃ³a ${removedAdmins.length} QTV`;
+                                }
+
+                                let punishmentMsg = "";
+                                if (violatorWasDemoted) {
+                                    punishmentMsg = `\nâš ï¸ ÄÃ£ gá»¡ quyá»n QTV cá»§a ${userName} do vi pháº¡m!`;
+                                }
+
+                                sendAntiMessage(
+                                    api,
+                                    `⚠️ ANTI ADMIN - CHẶN THAY ĐỔI QTV\n\n` +
+                                    `Người vi phạm: ${userName}\n` +
+                                    `ID: ${author}\n` +
+                                    `Hành động: ${changeDesc}\n` +
+                                    `Thời gian: ${time}\n\n` +
+                                    `Đã khôi phục danh sách QTV!${punishmentMsg}\n` +
+                                    `Chỉ Admin Bot mới được thay đổi QTV!`,
+                                    threadID
+                                );
+                            }
+                        } catch (error) {
+                            console.error("Error restoring admin status:", error);
+                            sendAntiMessage(
+                                api,
+                                `⚠️ ANTI ADMIN\n\n` +
+                                `Không thể khôi phục danh sách QTV.\n` +
+                                `Vui lòng tắt anti để thay đổi!`,
+                                threadID
+                            );
+                        }
+                    }
+                    break;
+                }
+
+                default:
+                    break;
+            }
+
+        } catch (error) {
+            console.error("Error in handleRefresh:", error);
+        }
+    };
+};
+
+async function updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData) {
+    try {
+        switch (logMessageType) {
+            case "log:thread-name":
+                updateThreadDataInSettings(antiSettings, threadID, 'threadName', logMessageData.name);
+                //console.log(`[Anti] âœ“ Updated threadName for thread ${threadID}`);
+                break;
+            case "log:thread-color":
+                updateThreadDataInSettings(antiSettings, threadID, 'themeColor', logMessageData.theme_color);
+                updateThreadDataInSettings(antiSettings, threadID, 'themeId', logMessageData.theme_id);
+                updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', logMessageData.accessibility_label);
+                //console.log(`[Anti] âœ“ Updated theme data - ID: ${logMessageData.theme_id}, Color: ${logMessageData.theme_color}, Label: ${logMessageData.accessibility_label}`);
+                break;
+            case "log:thread-icon":
+                {
+                    const emojiValue =
+                        logMessageData.thread_icon ||
+                        logMessageData.thread_quick_reaction_emoji ||
+                        logMessageData.custom_emoji;
+                    if (emojiValue) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'emoji', emojiValue);
+                    }
+                    const emojiUrl =
+                        logMessageData.thread_quick_reaction_emoji_url ||
+                        logMessageData.thread_icon_url;
+                    if (emojiUrl) {
+                        updateThreadDataInSettings(antiSettings, threadID, 'emojiUrl', emojiUrl);
+                    }
+                }
+                break;
+            case "log:user-nickname":
+                const participant_id = String(logMessageData.participant_id);
+                const newNickname = logMessageData.nickname || null;
+                const savedData = antiSettings.threads[threadID]?.data || {};
+                if (!savedData.nicknames) savedData.nicknames = {};
+                savedData.nicknames[participant_id] = newNickname;
+                updateThreadDataInSettings(antiSettings, threadID, 'nicknames', savedData.nicknames);
+                //console.log(`[Anti] âœ“ Updated nickname for ${participant_id}`);
+                break;
+            case "log:thread-image":
+                updateThreadDataInSettings(antiSettings, threadID, 'imageSrc', logMessageData.url);
+                //console.log(`[Anti] âœ“ Updated imageSrc for thread ${threadID}`);
+                break;
+            case "log:thread-admins":
+                const threadInfo = await api.getThreadInfo(threadID);
+                const currentAdmins = (threadInfo.adminIDs || []).map(a => String(a.id || a));
+                updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdmins);
+                //console.log(`[Anti] âœ“ Updated adminIDs for thread ${threadID}`);
+                break;
+        }
+        saveAntiSettings(antiSettings);
+    } catch (error) {
+        console.error("[Anti] âœ— Error updating data:", error);
+    }
+}
+
+module.exports.loadAntiSettings = loadAntiSettings;
+module.exports.saveAntiSettings = saveAntiSettings;
+module.exports.getThreadData = getThreadData;
+module.exports.updateThreadDataInSettings = updateThreadDataInSettings;
+
+
+
+
