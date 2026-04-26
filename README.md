@@ -246,19 +246,6 @@ npm run dev
 
 Một số lệnh có thể phụ thuộc vào quyền, cấu hình bot và API key.
 
-### Bảo Mật Khi Up Git
-
-Không nên commit các thông tin sau:
-
-- API key thật trong `bot/config.json`.
-- Cookie Facebook.
-- Access token.
-- Tài khoản/mật khẩu Facebook.
-- File `.env`.
-- Database runtime hoặc cache riêng tư.
-
-Hãy dùng file cấu hình riêng cho mỗi môi trường deploy.
-
 ### Tác Giả
 
 Created by **Hoàng Đình Quyết (HoangDev)**.
