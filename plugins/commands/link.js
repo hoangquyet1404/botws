@@ -3,7 +3,7 @@ module.exports = {
         name: "link",
         aliases: ["joinlink", "viewlink"],
         version: "1.0.0",
-        role: 3,
+        role: 2,
         author: "Admin",
         info: "Test join/view group links API (joinLink)",
         Category: "Admin",

@@ -1,11 +1,27 @@
-const { initFCA } = require('./fca'), listen = require('./main/listen'), config = require('./config.json');
+const { initFCA } = require('./fca'), listen = require('./main/listen');
 const fs = require('fs'), path = require('path'), logger = require('./main/utils/log');
+const performAutoLogin = require('./main/utils/autolog');
+const isAutologEnabled = performAutoLogin.isAutologEnabled;
+const database = require('./main/utils/database');
+
+const config = require('./config.json');
+
+function prepareRuntimeConfig(targetConfig) {
+    const merged = { ...targetConfig };
+
+    if (!merged.__e2eeSessionKey) {
+        merged.__e2eeSessionKey = `bot-${process.pid}-${Date.now()}`;
+    }
+
+    return merged;
+}
 
 global.tools = require("./main/tools.js");
-global.config = config;
+global.config = prepareRuntimeConfig(config);
 global.concac = {
     commands: new Map(), events: new Map(), cd: new Map(), eventRegistered: [],
     onReply: [], onReaction: [], handleSchedule: new Map(), mainPath: process.cwd(), api: null,
+    database,
     configPath: path.join(process.cwd(), 'config.json'),
     commandsPath: path.join(process.cwd(), 'plugins/commands'),
     eventsPath: path.join(process.cwd(), 'plugins/events')
@@ -27,7 +43,7 @@ function loadPlugins() {
                 if (global.concac[col].has(config.name)) throw new Error("Name duplicated");
 
                 const money = require(path.join(process.cwd(), 'main/utils/money.js'));
-                if (onLoad) try { onLoad({ api: global.concac.api, models: {}, money }); } catch (e) { logger.error(`onLoad ${file}: ${e.message}`); }
+                if (onLoad) try { onLoad({ api: global.concac.api, models: {}, money, database }); } catch (e) { logger.error(`onLoad ${file}: ${e.message}`); }
                 if (onEvent) global.concac.eventRegistered.push(config.name);
 
                 global.concac[col].set(config.name, item);
@@ -44,20 +60,25 @@ function loadPlugins() {
 
 async function main() {
     try {
+        const runtimeConfig = prepareRuntimeConfig(global.config);
         const cookiePath = path.join(__dirname, 'cookie.txt');
         if (fs.existsSync(cookiePath)) {
             const cookie = fs.readFileSync(cookiePath, 'utf8').trim();
-            if (cookie) config.cookie = cookie;
+            if (cookie) runtimeConfig.cookie = cookie;
         }
 
-        const api = await initFCA(config);
+        global.config = runtimeConfig;
+        const api = await initFCA(runtimeConfig);
         global.concac.api = api;
         loadPlugins();
         listen({ api });
         logger.success('System is ready to work!');
     } catch (e) {
         logger.error(`Startup failed: ${e.message}`);
-        process.exit(config.status ? 1 : 0);
+        if (performAutoLogin.shouldStopRestart(e)) {
+            logger.error('Auto-login exhausted. Stopping worker to avoid restart spam.');
+        }
+        process.exit(isAutologEnabled(global.config) && !performAutoLogin.shouldStopRestart(e) ? 1 : 0);
     }
 }
 

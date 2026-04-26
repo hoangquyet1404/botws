@@ -1,23 +1,14 @@
 // noti.js - Command quản lý thông báo events
-const fs = require("fs");
-const path = require("path");
 
-const notiSettingsPath = path.join(process.cwd(), '/main/data/notiSettings.json');
-
-function loadNotiSettings() {
-    try {
-        if (!fs.existsSync(notiSettingsPath)) {
-            fs.writeFileSync(notiSettingsPath, JSON.stringify({ threads: {} }, null, 2));
-        }
-        return JSON.parse(fs.readFileSync(notiSettingsPath, 'utf8'));
-    } catch (error) {
-        return { threads: {} };
-    }
+function loadNotiSettings(database) {
+    const settings = database.get.json("notiSettings", "default", { threads: {} });
+    if (!settings.threads || typeof settings.threads !== "object") settings.threads = {};
+    return settings;
 }
 
-function saveNotiSettings(data) {
+function saveNotiSettings(database, data) {
     try {
-        fs.writeFileSync(notiSettingsPath, JSON.stringify(data, null, 2), 'utf8');
+        database.update.json("notiSettings", "default", data || { threads: {} });
         return true;
     } catch (error) {
         return false;
@@ -56,7 +47,7 @@ module.exports = {
         cd: 3
     },
 
-    onRun: async function({ api, event, args }) {
+    onRun: async function({ api, event, args, database }) {
         try {
             const { threadID, messageID, senderID } = event;
             const threadInfo = await api.getThreadInfo(threadID);
@@ -70,7 +61,7 @@ module.exports = {
                 return api.sendMessage("⚠️ Chỉ QTV/Admin mới dùng được lệnh này!", threadID, messageID);
             }
 
-            const notiSettings = loadNotiSettings();
+            const notiSettings = loadNotiSettings(database);
             
             if (!notiSettings.threads[threadID]) {
                 notiSettings.threads[threadID] = {
@@ -224,7 +215,7 @@ module.exports = {
                     threadNoti.notiJoin = enable;
                     threadNoti.notiLeave = enable;
                     
-                    saveNotiSettings(notiSettings);
+                    saveNotiSettings(database, notiSettings);
                     return api.sendMessage(
                         `TẤT CẢ thông báo: ${enable ? "🟢 BẬT" : "🔴 TẮT"}`,
                         threadID,
@@ -244,7 +235,7 @@ module.exports = {
                     );
             }
 
-            saveNotiSettings(notiSettings);
+            saveNotiSettings(database, notiSettings);
 
             const optionNames = {
                 name: "đổi tên",
@@ -289,7 +280,7 @@ module.exports = {
         }
     },
 
-    onReply: async function({ api, event, onReply, cleanup }) {
+    onReply: async function({ api, event, onReply, cleanup, database }) {
         try {
             const { threadID, messageID, senderID, body } = event;
             
@@ -301,7 +292,7 @@ module.exports = {
 
             const input = body.trim().toLowerCase();
             if (input === "all" || input === "tatca") {
-                const notiSettings = loadNotiSettings();
+                const notiSettings = loadNotiSettings(database);
                 const threadNoti = notiSettings.threads[threadID];
                 
                 if (!threadNoti) return;
@@ -322,7 +313,7 @@ module.exports = {
                 threadNoti.notiJoin = newStatus;
                 threadNoti.notiLeave = newStatus;
                 
-                saveNotiSettings(notiSettings);
+                saveNotiSettings(database, notiSettings);
                 
                 return api.sendMessage(
                     `TẤT CẢ thông báo: ${newStatus ? "🟢 BẬT" : "🔴 TẮT"}`,
@@ -336,7 +327,7 @@ module.exports = {
                 return api.sendMessage("⚠️ Reply số 1-12 hoặc 'all'!", threadID, messageID);
             }
 
-            const notiSettings = loadNotiSettings();
+            const notiSettings = loadNotiSettings(database);
             const threadNoti = notiSettings.threads[threadID];
 
             if (!threadNoti) return;
@@ -361,7 +352,7 @@ module.exports = {
             threadNoti[selected.key] = !currentStatus;
             threadNoti.enabled = true;
 
-            saveNotiSettings(notiSettings);
+            saveNotiSettings(database, notiSettings);
 
             const newStatus = !currentStatus ? "🟢 BẬT" : "🔴 TẮT";
             api.sendMessage(

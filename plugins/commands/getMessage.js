@@ -3,7 +3,7 @@ module.exports = {
         name: "getmessage",
         aliases: ["getmsg", "checkmsg"],
         version: "1.0.0",
-        role: 1, // Admin
+        role: 1, // qtv
         author: "qh",
         info: "Lấy thông tin chi tiết của tin nhắn thông qua messageID",
         Category: "Box",

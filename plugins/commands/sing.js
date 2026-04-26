@@ -3,7 +3,39 @@
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { exec } = require("child_process");
+const { downloadMediaAsBase64 } = require("../../main/utils/mediaDownload");
+
+function getApiBaseUrl() {
+  const base = String(global.config?.api?.url || "").trim();
+  return (base.endsWith("/") ? base.slice(0, -1) : base).replace(/\/api\/v1$/i, "");
+}
+
+function getApiKeyHeaders() {
+  const key = global.config?.api?.key;
+  return key ? { "x-api-key": key } : {};
+}
+
+function normalizeDownResult(payload) {
+  const candidates = [
+    payload,
+    payload?.data,
+    payload?.result,
+    payload?.payload,
+    payload?.data?.result,
+    payload?.data?.data,
+    payload?.result?.data,
+    payload?.payload?.data
+  ];
+
+  for (const item of candidates) {
+    if (!item) continue;
+    if (Array.isArray(item.medias)) return item;
+    if (Array.isArray(item.media)) return { ...item, medias: item.media };
+    if (Array.isArray(item.items)) return { ...item, medias: item.items };
+  }
+
+  return null;
+}
 
 module.exports = {
   config: {
@@ -117,9 +149,17 @@ module.exports = {
       }
 
       const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const apiUrl = `${global.config.api.url}/api/downall`;
-      const res = await axios.get(apiUrl, { params: { url: videoUrl } });
-      const data = res.data;
+      const apiUrl = `${getApiBaseUrl()}/api/v1/downall`;
+      const res = await axios.get(apiUrl, {
+        params: { url: videoUrl, apikey: global.config?.api?.key },
+        headers: getApiKeyHeaders(),
+        timeout: 120000,
+        validateStatus: () => true
+      });
+      if (res.status >= 400) {
+        throw new Error(res.data?.error || res.data?.message || `DownAll HTTP ${res.status}`);
+      }
+      const data = normalizeDownResult(res.data);
       const medias = Array.isArray(data?.medias) ? data.medias : [];
       const audio = medias.find((m) => m?.type === "audio" && m?.url);
       if (!audio?.url) {
@@ -131,44 +171,31 @@ module.exports = {
 
       if (!fs.existsSync(path.dirname(finalPath))) fs.mkdirSync(path.dirname(finalPath), { recursive: true });
 
-      async function getStreamAndSize(url, headers = {}) {
-        const requestHeaders = { Range: "bytes=0-", ...headers };
-        const res = await axios.get(url, {
-          responseType: "stream",
-          headers: requestHeaders,
-          maxContentLength: Infinity,
-          maxBodyLength: Infinity
-        });
-
-        const len = Number(res.headers["content-length"] || 0);
-        const cr = res.headers["content-range"];
-        const total = cr ? Number(String(cr).split("/").pop()) : len;
-
-        return { stream: res.data, size: total || len };
-      }
-      const { stream } = await getStreamAndSize(audio.url);
-      const audioBuffer = await new Promise((resolve, reject) => {
-        const chunks = [];
-        stream.on('data', chunk => chunks.push(chunk));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-        stream.on('error', reject);
-      });
-
-      const base64Audio = audioBuffer.toString('base64');
-
-      const apiConvertUrl = global.config.api.url + (global.config.api.url.endsWith('/') ? '' : '/') + 'api/media/convert';
+      const apiConvertUrl = `${getApiBaseUrl()}/api/v1/media/convert`;
+      const downloadedAudio = await downloadMediaAsBase64(audio.url, audio.headers || audio.httpHeaders || {});
 
       const convertResponse = await axios({
         method: 'POST',
         url: apiConvertUrl,
-        data: {
-          audio: base64Audio,
+        params: {
           ext: 'mp4'
-        }
+        },
+        data: {
+          audio: downloadedAudio.base64,
+          ext: 'mp4'
+        },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getApiKeyHeaders()
+        },
+        timeout: 0,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        validateStatus: () => true
       });
 
-      if (!convertResponse.data.success && !convertResponse.data.data) {
-        throw new Error(convertResponse.data.error || "Conversion failed at API");
+      if (convertResponse.status >= 400 || !convertResponse.data?.success || !convertResponse.data?.data) {
+        throw new Error(convertResponse.data?.error || convertResponse.data?.message || `Conversion HTTP ${convertResponse.status}`);
       }
 
       const mp3Buffer = Buffer.from(convertResponse.data.data, 'base64');

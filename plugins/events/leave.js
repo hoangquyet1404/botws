@@ -12,27 +12,16 @@ module.exports = {
         eventType: ["log:unsubscribe"]
     },
 
-    onEvent: async function ({ api, event }) {
+    onEvent: async function ({ api, event, database }) {
         try {
             const { threadID, logMessageData, author } = event;
 
             if (!logMessageData || !logMessageData.leftParticipantFbId) return;
 
-            const fs = require('fs');
-            const path = require('path');
-
             const leftUserID = String(logMessageData.leftParticipantFbId);
             const isSelfLeave = String(author) === leftUserID;
-            const notiSettingsPath = path.resolve(__dirname, '../../main/data/notiSettings.json');
-            let notiSettings = { threads: {} };
-
-            try {
-                if (fs.existsSync(notiSettingsPath)) {
-                    notiSettings = JSON.parse(fs.readFileSync(notiSettingsPath, 'utf8'));
-                }
-            } catch (err) {
-                console.error("Error loading noti settings:", err);
-            }
+            let notiSettings = database.get.json('notiSettings', 'default', { threads: {} });
+            if (!notiSettings.threads || typeof notiSettings.threads !== 'object') notiSettings.threads = {};
             const isBotLeave = leftUserID === api.getCurrentUserID();
 
             if (isBotLeave) {

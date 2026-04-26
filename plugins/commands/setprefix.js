@@ -1,7 +1,3 @@
-
-const fs = require('fs');
-const path = require('path');
-
 module.exports = {
     config: {
         name: "setprefix",
@@ -17,20 +13,13 @@ module.exports = {
         images: []
     },
 
-    onRun: async function({ api, event, args, permssion }) {
+    onRun: async function({ api, event, args, permssion, database }) {
         const { threadID, messageID, senderID } = event;
-        const prefixDataPath = path.join(process.cwd(), 'main/data/prefixData.json');
 
         try {
-            let prefixData = { threads: {} };
-            
-            if (fs.existsSync(prefixDataPath)) {
-                prefixData = JSON.parse(fs.readFileSync(prefixDataPath, 'utf8'));
-            }
-
             const newPrefix = args[0];
             if (!newPrefix) {
-                const currentPrefix = prefixData.threads[threadID]?.prefix || global.config.PREFIX;
+                const currentPrefix = database.get.threadSetting('prefixData', threadID, null)?.prefix || global.config.PREFIX;
                 return api.sendMessage(
                     `📌 PREFIX HIỆN TẠI\n` +
                     `━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -41,16 +30,27 @@ module.exports = {
                     messageID
                 );
             }
+            if (['reset', 'default', 'off'].includes(String(newPrefix).toLowerCase())) {
+                const existed = database.delete.threadSetting('prefixData', threadID);
+                if (global.rentScheduler) {
+                    global.rentScheduler.updateNickname(threadID);
+                }
+                return api.sendMessage(
+                    existed
+                        ? `✅ Đã xoá prefix riêng, nhóm dùng lại prefix mặc định: ${global.config.PREFIX}`
+                        : `Nhóm này đang dùng prefix mặc định: ${global.config.PREFIX}`,
+                    threadID,
+                    messageID
+                );
+            }
             if (newPrefix.length > 5) {
                 return api.sendMessage(" Prefix không được dài quá 5 ký tự!", threadID, messageID);
             }
-            prefixData.threads[threadID] = {
+            database.update.threadSetting('prefixData', threadID, {
                 prefix: newPrefix,
                 setBy: senderID,
                 setTime: Date.now()
-            };
-
-            fs.writeFileSync(prefixDataPath, JSON.stringify(prefixData, null, 2), 'utf8');
+            });
             if (global.rentScheduler) {
                 global.rentScheduler.updateNickname(threadID);
             }

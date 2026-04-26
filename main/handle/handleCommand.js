@@ -1,10 +1,9 @@
-const fs = require("fs");
-const path = require("path");
 const stringSimilarity = require('string-similarity');
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const utils = require("../utils/log");
 const moment = require("moment-timezone");
 const money = require("../utils/money");
+const store = require("../utils/database");
 
 module.exports = function ({ api }) {
   return async function ({ event }) {
@@ -13,33 +12,44 @@ module.exports = function ({ api }) {
     const { allowInbox, PREFIX, ADMINBOT, NDH, DeveloperMode, adminOnly } = global.config;
     // const PREFIX = prefix || global.config.PREFIX || "!";
     const { commands, cd } = global.concac;
+    if (event?.isE2EE && typeof api.rememberE2EEEvent === 'function') {
+      api.rememberE2EEEvent(event);
+    }
+
     var { body, senderID, threadID, messageID } = event;
     senderID = String(senderID);
     threadID = String(threadID);
     messageID = String(messageID);
-    const threadInfo = (await api.getThreadInfo(threadID)) || {};
+    let threadInfo = {};
+    if (event?.isE2EE) {
+      threadInfo = {
+        threadID,
+        threadName: event.threadName || event.name || '',
+        userInfo: Array.isArray(event.userInfo) ? event.userInfo : [],
+        participantIDs: Array.isArray(event.participantIDs) && event.participantIDs.length > 0
+          ? event.participantIDs
+          : [senderID, api.getCurrentUserID?.()].filter(Boolean),
+        adminIDs: [],
+        isGroup: Boolean(event.isGroup),
+        isE2EE: true,
+        chatJid: event.chatJid || ''
+      };
+    } else {
+      threadInfo = (await api.getThreadInfo(threadID)) || {};
+    }
     const senderUser = (threadInfo.userInfo || []).find(u => u.id === senderID);
     const ten = senderUser ? senderUser.name : 'Unknown User';
-    const databanPath = path.resolve(__dirname, '../data/databan.json');
     let dataBan = { users: {}, threads: {} };
     const findd = (threadInfo.adminIDs || []).some(admin => admin.id == senderID);
     let prefixbox = PREFIX;
     if (global.rentScheduler) {
       prefixbox = global.rentScheduler.getPrefix(threadID) || PREFIX;
     } else {
-      const prefixDataPath = path.resolve(__dirname, '../data/prefixData.json');
-      if (fs.existsSync(prefixDataPath)) {
-        const prefixData = JSON.parse(fs.readFileSync(prefixDataPath));
-        prefixbox = prefixData.threads[threadID]?.prefix || PREFIX;
-      }
+      const prefixData = store.getJson('prefixData', 'default', { threads: {} });
+      prefixbox = prefixData.threads[threadID]?.prefix || PREFIX;
     }
 
-    const dataAdboxPath = path.resolve(__dirname, '../data/dataAdbox.json');
-    let dataAdbox = { adminbox: {} };
-    if (fs.existsSync(dataAdboxPath)) {
-      delete require.cache[require.resolve(dataAdboxPath)];
-      dataAdbox = JSON.parse(fs.readFileSync(dataAdboxPath, 'utf8'));
-    }
+    let dataAdbox = store.getJson('dataAdbox', 'default', { adminbox: {} });
 
     if (typeof body === 'string' && body.startsWith(prefixbox) && !NDH.includes(senderID) && !ADMINBOT.includes(senderID) && adminOnly == true) {
       return api.sendMessage('[ WARNING ] - Hiện tại đang bật chế độ AdminOnly chỉ ADMIN mới được sử dụng bot!!!', threadID, null, messageID);
@@ -47,10 +57,15 @@ module.exports = function ({ api }) {
     if (typeof body === 'string' && body.startsWith(prefixbox) && dataAdbox.adminbox && dataAdbox.adminbox[threadID] == true && !NDH.includes(senderID) && !ADMINBOT.includes(senderID) && !findd && event.isGroup == true) {
       return api.sendMessage('[ WARNING ] - Hiện tại nhóm này đang bật chế độ chỉ quản trị viên nhóm mới có thể sử dụng bot!!!', threadID, null, messageID);
     }
-    if (fs.existsSync(databanPath)) {
-      dataBan = JSON.parse(fs.readFileSync(databanPath));
-    }
-    if (dataBan.users[senderID] || dataBan.threads[threadID] || (allowInbox == false && senderID == threadID && body && body.startsWith(PREFIX))) {
+    dataBan = store.getJson('databan', 'default', dataBan);
+    const isPrivilegedUser = ADMINBOT.includes(senderID) || NDH.includes(senderID);
+    const shouldBlockInboxCommand = allowInbox == false
+      && senderID == threadID
+      && body
+      && body.startsWith(PREFIX)
+      && !isPrivilegedUser;
+
+    if (dataBan.users[senderID] || dataBan.threads[threadID] || shouldBlockInboxCommand) {
       if ((body || '').startsWith(prefixbox)) {
         if (!ADMINBOT.includes(senderID) && !NDH.includes(senderID)) {
           if (dataBan.users[senderID]) {
@@ -137,13 +152,7 @@ module.exports = function ({ api }) {
         }, messageID);
       }
     }
-    const commandBannedPath = path.resolve(__dirname, '../data/commandBanned.json');
-    let commandBannedData = {};
-    if (fs.existsSync(commandBannedPath)) {
-      commandBannedData = JSON.parse(fs.readFileSync(commandBannedPath));
-    }
-    const pathData = path.resolve(__dirname, '../data/commands-banned.json');
-    const disableCommandPath = path.resolve(__dirname, '../data/disable-command.json');
+    let commandBannedData = store.getJson('commandBanned', 'default', {});
     const send = (msg, replyTo = null, callback = null) => {
       if (callback) {
         return api.sendMessage(msg, threadID, callback, replyTo);
@@ -159,8 +168,8 @@ module.exports = function ({ api }) {
       return user ? user.name : 'Unknown';
     };
     const cmd = command.config.name;
-    let data = fs.existsSync(pathData) ? JSON.parse(fs.readFileSync(pathData)) : {};
-    let disableData = fs.existsSync(disableCommandPath) ? JSON.parse(fs.readFileSync(disableCommandPath)) : {};
+    let data = store.getJson('commands-banned', 'default', {});
+    let disableData = store.getJson('disable-command', 'default', {});
     if (data[threadID]) {
       const ban = data[threadID].cmds.find(b => b.cmd == cmd);
       const userBans = data[threadID].users[senderID] || {};
@@ -218,12 +227,9 @@ module.exports = function ({ api }) {
         utils(`Lỗi: Không thể lấy thông tin về luồng dữ liệu: ${err}`, 'error');
       }
     }
-    const nsfwPath = path.resolve(__dirname, '../data/threadAllowNSFW.json');
     let threadAllowNSFW = [];
-    if (fs.existsSync(nsfwPath)) {
-      const nsfwData = JSON.parse(fs.readFileSync(nsfwPath));
-      threadAllowNSFW = nsfwData.threads || [];
-    }
+    const nsfwData = store.getJson('threadAllowNSFW', 'default', { threads: [] });
+    threadAllowNSFW = nsfwData.threads || [];
     if (command.config.Category.toLowerCase() == 'Nsfw' && !threadAllowNSFW.includes(threadID) && !NDH.includes(senderID) && !ADMINBOT.includes(senderID)) {
       return api.sendMessage(`❎ Nhóm không được phép sử dụng các lệnh thuộc nhóm NSFW!`, threadID, (err, info) => {
         if (!err) {
@@ -274,9 +280,12 @@ module.exports = function ({ api }) {
         addMoney: (userID, amount) => money.addMoney(threadID, userID, amount),
         subtractMoney: (userID, amount) => money.subtractMoney(threadID, userID, amount),
         setMoney: (userID, amount) => money.setMoney(threadID, userID, amount),
-        pay: (userID, receiverID, amount) => money.pay(threadID, userID, receiverID, amount)
+        pay: (userID, receiverID, amount) => money.pay(threadID, userID, receiverID, amount),
+        getBoxData: () => money.getBoxData(threadID),
+        resetThread: () => money.resetThread(threadID),
+        resetAll: () => money.resetAll()
       };
-      await command.onRun({ api, event, args, permssion, money: Currencies });
+      await command.onRun({ api, event, args, permssion, money: Currencies, database: store });
       timestamps.set(senderID, dateNow);
       if (DeveloperMode) utils(`Lệnh ${commandName} được thực thi lúc ${time} bởi ${senderID} trong nhóm ${threadID}, thời gian thực thi: ${(Date.now()) - dateNow}ms`, "MODE");
     } catch (e) {

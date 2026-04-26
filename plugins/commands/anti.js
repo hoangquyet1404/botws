@@ -1,22 +1,10 @@
-
-const fs = require("fs");
-const path = require("path");
-
-const antiSettingsPath = path.join(process.cwd(), '/main/data/antiSettings.json');
-function loadAntiSettings() {
-    try {
-        if (!fs.existsSync(antiSettingsPath)) {
-            fs.writeFileSync(antiSettingsPath, JSON.stringify({ threads: {} }, null, 2));
-        }
-        return JSON.parse(fs.readFileSync(antiSettingsPath, 'utf8'));
-    } catch (error) {
-        return { threads: {} };
-    }
+function loadAntiSettings(database) {
+    return database.get.json("antiSettings", "default", { threads: {} });
 }
 
-function saveAntiSettings(data) {
+function saveAntiSettings(database, data) {
     try {
-        fs.writeFileSync(antiSettingsPath, JSON.stringify(data, null, 2), 'utf8');
+        database.update.json("antiSettings", "default", data || { threads: {} });
         return true;
     } catch (error) {
         return false;
@@ -44,12 +32,12 @@ module.exports = {
             "anti leave on/off - Anti tự ý rời nhóm",
             "anti all on/off - Bật/tắt tất cả anti",
             "anti status - Xem trạng thái anti",
-            "anti admin on/off - Cho phép admin nhóm thay đổi"
+            "anti allowadmin on/off - Cho phép admin nhóm thay đổi"
         ].join("\n"),
         cd: 5
     },
 
-    onRun: async function({ api, event, args }) {
+    onRun: async function({ api, event, args, database }) {
         try {
             const { threadID, messageID, senderID } = event;
             const threadInfo = await api.getThreadInfo(threadID);
@@ -63,7 +51,7 @@ module.exports = {
                 return api.sendMessage("⚠️ Chỉ QTV/Admin mới dùng được lệnh này!", threadID, messageID);
             }
 
-            const antiSettings = loadAntiSettings();
+            const antiSettings = loadAntiSettings(database);
             
             if (!antiSettings.threads[threadID]) {
                 antiSettings.threads[threadID] = {
@@ -131,19 +119,11 @@ module.exports = {
                         const handleRefresh = require('../../main/handle/handleRefresh');
                         const currentData = await handleRefresh.getThreadData(api, threadID);
                         if (currentData) {
-                            threadSettings.data = {
-                                threadName: currentData.threadName,
-                                emoji: currentData.emoji,
-                                color: currentData.color,
-                                imageSrc: currentData.imageSrc,
-                                nicknames: currentData.nicknames,
-                                adminIDs: currentData.adminIDs,
-                                lastUpdate: Date.now()
-                            };
+                            threadSettings.data = { ...currentData, lastUpdate: Date.now() };
                         }
                     }
                     
-                    saveAntiSettings(antiSettings);
+                    saveAntiSettings(database, antiSettings);
                     
                     return api.sendMessage(
                         `Anti-Change: ${enable ? "🟢 BẬT" : "🔴 TẮT"}`,
@@ -217,19 +197,11 @@ module.exports = {
                         const handleRefresh = require('../../main/handle/handleRefresh');
                         const currentData = await handleRefresh.getThreadData(api, threadID);
                         if (currentData) {
-                            threadSettings.data = {
-                                threadName: currentData.threadName,
-                                emoji: currentData.emoji,
-                                color: currentData.color,
-                                imageSrc: currentData.imageSrc,
-                                nicknames: currentData.nicknames,
-                                adminIDs: currentData.adminIDs,
-                                lastUpdate: Date.now()
-                            };
+                            threadSettings.data = { ...currentData, lastUpdate: Date.now() };
                         }
                     }
                     
-                    saveAntiSettings(antiSettings);
+                    saveAntiSettings(database, antiSettings);
                     
                     return api.sendMessage(
                         `TẤT CẢ Anti: ${enable ? "🟢 BẬT" : "🔴 TẮT"}`,
@@ -238,10 +210,12 @@ module.exports = {
                         messageID
                     );
 
-                case "admin":
-                case "qtv":
+                case "allowadmin":
+                case "allowqtv":
+                case "groupadmin":
+                case "adminallow":
                     threadSettings.allowGroupAdmin = enable;
-                    saveAntiSettings(antiSettings);
+                    saveAntiSettings(database, antiSettings);
                     return api.sendMessage(
                         `Admin nhóm được phép: ${enable ? "🟢 BẬT" : "🔴 TẮT"}`,
                         threadID,
@@ -259,21 +233,13 @@ module.exports = {
                         messageID
                     );
             }
-            saveAntiSettings(antiSettings);
-            if (enable && !threadSettings.data.lastUpdate) {
+            saveAntiSettings(database, antiSettings);
+            if (enable) {
                 const handleRefresh = require('../../main/handle/handleRefresh');
                 const currentData = await handleRefresh.getThreadData(api, threadID);
                 if (currentData) {
-                    threadSettings.data = {
-                        threadName: currentData.threadName,
-                        emoji: currentData.emoji,
-                        color: currentData.color,
-                        imageSrc: currentData.imageSrc,
-                        nicknames: currentData.nicknames,
-                        adminIDs: currentData.adminIDs,
-                        lastUpdate: Date.now()
-                    };
-                    saveAntiSettings(antiSettings);
+                    threadSettings.data = { ...currentData, lastUpdate: Date.now() };
+                    saveAntiSettings(database, antiSettings);
                 }
             }
             const optionNames = {
@@ -300,7 +266,7 @@ module.exports = {
         }
     },
 
-    onReply: async function({ api, event, onReply, cleanup }) {
+    onReply: async function({ api, event, onReply, cleanup, database }) {
         try {
             const { threadID, messageID, senderID, body } = event;
             
@@ -313,7 +279,7 @@ module.exports = {
                 return api.sendMessage("⚠️ Vui lòng reply số từ 1-8!", threadID, null, messageID);
             }
 
-            const antiSettings = loadAntiSettings();
+            const antiSettings = loadAntiSettings(database);
             const threadSettings = antiSettings.threads[threadID];
 
             if (!threadSettings) {
@@ -350,24 +316,15 @@ module.exports = {
 
             settings.enabled = true;
 
-            if (!currentStatus && !settings.data.lastUpdate) {
+            if (!currentStatus) {
                 const handleRefresh = require('../../main/handle/handleRefresh');
                 const currentData = await handleRefresh.getThreadData(api, threadID);
                 if (currentData) {
-                    settings.data = {
-                        threadName: currentData.threadName,
-                        emoji: currentData.emoji,
-                        themeColor: currentData.themeColor,
-                        themeId: currentData.themeId,
-                        imageSrc: currentData.imageSrc,
-                        nicknames: currentData.nicknames,
-                        adminIDs: currentData.adminIDs,
-                        lastUpdate: Date.now()
-                    };
+                    settings.data = { ...currentData, lastUpdate: Date.now() };
                 }
             }
 
-            saveAntiSettings(antiSettings);
+            saveAntiSettings(database, antiSettings);
 
             const newStatus = !currentStatus ? "🟢 BẬT" : "🔴 TẮT";
             api.sendMessage(

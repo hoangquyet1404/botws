@@ -21,11 +21,13 @@ module.exports = {
         const { threadID, messageID, messageReply } = event;
 
         try {
-            if (!messageReply?.attachments?.[0] || messageReply.attachments[0].type !== 'photo') {
+            const replyInfo = messageReply;
+
+            if (!replyInfo?.attachments?.[0] || replyInfo.attachments[0].type !== 'photo') {
                 return api.sendMessage( "> Reply tin nhắn có ảnh để tạo theme",threadID, null,messageID);
             }
 
-            const imageUrl = messageReply.attachments[0].url ||  messageReply.attachments[0].largePreviewUrl || messageReply.attachments[0].previewUrl;
+            const imageUrl = replyInfo.attachments[0].url ||  replyInfo.attachments[0].largePreviewUrl || replyInfo.attachments[0].previewUrl || replyInfo.attachments[0].facebookUrl;
 
             if (!imageUrl) {
                 return api.sendMessage("> Không tìm thấy URL ảnh", threadID, null, messageID);

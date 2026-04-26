@@ -1,17 +1,12 @@
 // handleCommandEvent.js
 const logger = require("../utils/log");
-const fs = require("fs");
-const path = require("path");
 const money = require("../utils/money");
+const store = require("../utils/database");
 
 module.exports = function ({ api }) {
   return async function ({ event }) {
     const { allowInbox, NDH } = global.config;
-    const databanPath = path.resolve(__dirname, '../data/databan.json');
-    let dataBan = { users: {}, threads: {} };
-    if (fs.existsSync(databanPath)) {
-      dataBan = JSON.parse(fs.readFileSync(databanPath));
-    }
+    let dataBan = store.getJson('databan', 'default', { users: {}, threads: {} });
     const { commands, eventRegistered } = global.concac;
     const { senderID, threadID } = event;
     const fixUserIB = true;
@@ -28,9 +23,12 @@ module.exports = function ({ api }) {
             addMoney: (userID, amount) => money.addMoney(threadID, userID, amount),
             subtractMoney: (userID, amount) => money.subtractMoney(threadID, userID, amount),
             setMoney: (userID, amount) => money.setMoney(threadID, userID, amount),
-            pay: (userID, receiverID, amount) => money.pay(threadID, userID, receiverID, amount)
+            pay: (userID, receiverID, amount) => money.pay(threadID, userID, receiverID, amount),
+            getBoxData: () => money.getBoxData(threadID),
+            resetThread: () => money.resetThread(threadID),
+            resetAll: () => money.resetAll()
           };
-          await cmd.onEvent({ api, event, money: Currencies });
+          await cmd.onEvent({ api, event, money: Currencies, database: store });
         }
       } catch (error) {
         console.log(error);

@@ -1,18 +1,27 @@
 
 
-const fs = require('fs');
-const path = require('path');
 const moment = require('moment-timezone');
 const utils = require('./log');
+const store = require('./database');
 
 class RentScheduler {
     constructor(api) {
         this.api = api;
-        this.rentDataPath = path.join(__dirname, '../data/rentData.json');
-        this.prefixDataPath = path.join(__dirname, '../data/prefixData.json');
         this.isRunning = false;
         this.dailyInterval = null;
         this.initialTimeout = null;
+    }
+
+    getRentData() {
+        return store.getJson('rentData', 'default', { threads: {} });
+    }
+
+    saveRentData(data) {
+        store.setJson('rentData', 'default', data || { threads: {} });
+    }
+
+    getPrefixData() {
+        return store.getJson('prefixData', 'default', { threads: {} });
     }
 
     start() {
@@ -43,22 +52,14 @@ class RentScheduler {
         }, msUntilNextRun);
     }
     async updateAllDataAndNicknames() {
-        if (!fs.existsSync(this.rentDataPath)) {
-            // console.log('[RentScheduler] No rentData.json file found');
-            return;
-        }
         const isMqttConnected = this.api.ctx && this.api.ctx.mqttClient && this.api.ctx.mqttClient.connected;
         if (!isMqttConnected) {
             //console.log('[RentScheduler] MQTT not connected - Updating data only, skipping nicknames');
         }
 
         try {
-            let rentData = JSON.parse(fs.readFileSync(this.rentDataPath, 'utf8'));
-            let prefixData = {};
-
-            if (fs.existsSync(this.prefixDataPath)) {
-                prefixData = JSON.parse(fs.readFileSync(this.prefixDataPath, 'utf8'));
-            }
+            let rentData = this.getRentData();
+            let prefixData = this.getPrefixData();
 
             const threads = rentData.threads || {};
             const threadList = Object.keys(threads);
@@ -96,7 +97,7 @@ class RentScheduler {
             }
 
             if (dataUpdated) {
-                fs.writeFileSync(this.rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                this.saveRentData(rentData);
                 //console.log(`[RentScheduler] Saved rentData.json - Data updated for ${threadList.length} threads`);
             }
 
@@ -137,16 +138,8 @@ class RentScheduler {
         // }
 
         try {
-            let rentData = { threads: {} };
-            let prefixData = { threads: {} };
-
-            if (fs.existsSync(this.rentDataPath)) {
-                rentData = JSON.parse(fs.readFileSync(this.rentDataPath, 'utf8'));
-            }
-
-            if (fs.existsSync(this.prefixDataPath)) {
-                prefixData = JSON.parse(fs.readFileSync(this.prefixDataPath, 'utf8'));
-            }
+            let rentData = this.getRentData();
+            let prefixData = this.getPrefixData();
 
             const data = rentData.threads[threadID];
             const prefix = prefixData.threads?.[threadID]?.prefix || global.config.PREFIX;
@@ -169,7 +162,7 @@ class RentScheduler {
                 }
 
                 if (dataUpdated) {
-                    fs.writeFileSync(this.rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                    this.saveRentData(rentData);
                 }
 
                 if (daysLeft > 0) {
@@ -193,11 +186,7 @@ class RentScheduler {
 
     getRentInfo(threadID) {
         try {
-            if (!fs.existsSync(this.rentDataPath)) {
-                return null;
-            }
-
-            let rentData = JSON.parse(fs.readFileSync(this.rentDataPath, 'utf8'));
+            let rentData = this.getRentData();
             let data = rentData.threads[threadID];
 
             if (!data) return null;
@@ -207,10 +196,10 @@ class RentScheduler {
             const daysLeft = endMoment.diff(now, 'days');
             if (daysLeft !== data.days && daysLeft >= -7) {
                 rentData.threads[threadID].days = daysLeft;
-                fs.writeFileSync(this.rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                this.saveRentData(rentData);
             } else if (daysLeft < -7) {
                 delete rentData.threads[threadID];
-                fs.writeFileSync(this.rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                this.saveRentData(rentData);
                 return null;
             }
 
@@ -227,11 +216,7 @@ class RentScheduler {
     }
     getPrefix(threadID) {
         try {
-            if (!fs.existsSync(this.prefixDataPath)) {
-                return global.config.PREFIX;
-            }
-
-            const prefixData = JSON.parse(fs.readFileSync(this.prefixDataPath, 'utf8'));
+            const prefixData = this.getPrefixData();
             return prefixData.threads?.[threadID]?.prefix || global.config.PREFIX;
         } catch (error) {
             utils(`[RentScheduler] Error getting prefix: ${error}`, 'error');

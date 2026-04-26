@@ -2,6 +2,17 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const { downloadMediaAsBase64 } = require('../../main/utils/mediaDownload');
+
+function getApiBaseUrl() {
+    const base = String(global.config?.api?.url || '').trim();
+    return (base.endsWith('/') ? base.slice(0, -1) : base).replace(/\/api\/v1$/i, '');
+}
+
+function getApiKeyHeaders() {
+    const key = global.config?.api?.key;
+    return key ? { 'x-api-key': key } : {};
+}
 
 module.exports = {
     config: {
@@ -161,30 +172,34 @@ module.exports = {
             const finalFileName = `${Date.now()}.mp3`;
             const finalFilePath = path.join(cacheDir, finalFileName);
 
-            const response = await axios({
-                method: 'GET',
-                url: selectedTrack.url,
-                responseType: 'arraybuffer'
-            });
-
-            const base64Audio = Buffer.from(response.data, 'binary').toString('base64');
-            const apiUrl = global.config.api.url + (global.config.api.url.endsWith('/') ? '' : '/') + 'api/media/convert';
+            const apiUrl = `${getApiBaseUrl()}/api/v1/media/convert`;
+            const downloadedAudio = await downloadMediaAsBase64(selectedTrack.url, selectedTrack.headers || selectedTrack.httpHeaders || {});
 
             const convertResponse = await axios({
                 method: 'POST',
                 url: apiUrl,
-                data: {
-                    audio: base64Audio,
+                params: {
                     ext: 'mp4'
-                }
+                },
+                data: {
+                    audio: downloadedAudio.base64,
+                    ext: 'mp4'
+                },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getApiKeyHeaders()
+                },
+                timeout: 0,
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                validateStatus: () => true
             });
 
-            if (!convertResponse.data.success && !convertResponse.data.data) {
-                throw new Error(convertResponse.data.error || "Conversion failed at API");
+            if (convertResponse.status >= 400 || !convertResponse.data?.success || !convertResponse.data?.data) {
+                throw new Error(convertResponse.data?.error || convertResponse.data?.message || `Conversion HTTP ${convertResponse.status}`);
             }
 
             const mp3Buffer = Buffer.from(convertResponse.data.data, 'base64');
-            fs.writeFileSync(finalFilePath, mp3Buffer);
 
             if (loadingMsg && loadingMsg.messageID) {
                 api.unsendMessage(loadingMsg.messageID);
@@ -196,7 +211,13 @@ module.exports = {
 
             api.sendMessage({
                 body: `${selectedTrack.title}\n${selectedTrack.artist}\n${timeFormat}`,
-                attachment: fs.createReadStream(finalFilePath)
+                attachment: {
+                    buffer: mp3Buffer,
+                    filename: finalFileName,
+                    contentType: 'audio/mpeg',
+                    mimeType: 'audio/mpeg',
+                    mediaType: 'audio'
+                }
             }, threadID, (err) => {
                 // Cleanup files
                 try {

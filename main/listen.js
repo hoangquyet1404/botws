@@ -1,17 +1,138 @@
-const fs = require("fs"), path = require("path"), moment = require("moment-timezone");
+const moment = require("moment-timezone");
 const messageCounter = require('./utils/messageCounter'), RentScheduler = require('./utils/rentScheduler');
+const performAutoLogin = require('./utils/autolog');
+const isAutologEnabled = performAutoLogin.isAutologEnabled;
+const store = require('./utils/database');
+
+function getLogoutSignal(message) {
+    if (!message || typeof message !== 'object') return null;
+
+    const data = message.data || message.payload || message.logout || message.logoutEvent || message.mqttDetails || {};
+    const error = message.error || data.error || {};
+    const topic = message.topic || data.topic;
+    const type = String(message.type || '').toLowerCase();
+    const dataType = String(message.dataType || data.dataType || '').toLowerCase();
+    const logMessageType = String(message.logMessageType || data.logMessageType || '').toLowerCase();
+    const authState = String(message.authState || data.authState || '').toLowerCase();
+    const code = Number(message.code ?? data.code ?? error.code);
+    const text = [  message.reason, message.error, data.reason,  data.error, error.message, error.name, data.message, authState ].map(value => typeof value === 'string' ? value : '').join(' ').toLowerCase();
+    const logoutDetected = message.logoutDetected === true || message.isLogout === true || data.logoutDetected === true || data.isLogout === true || topic === '/mqtt_logout' || authState === 'logged_out' ||(type === 'system_event' && dataType === 'logout') || logMessageType === 'log:logout';
+    const criticalDetected = type === 'system_event' && dataType === 'error_critical';
+    const mqttDetected = type === 'mqtt_error' && ( code === 3 || text.includes('logged out') || text.includes('logout') || text.includes('not authorized') || text.includes('connection refused'));
+
+    if (!logoutDetected && !criticalDetected && !mqttDetected) return null;
+
+    return {
+        data,
+        logoutDetected: logoutDetected || mqttDetected,
+        reason: message.reason || data.reason || error.message || message.error || data.error || dataType || type
+    };
+}
+
+function toTimestampMs(value) {
+    if (value === undefined || value === null || value === '') return 0;
+    const raw = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(raw)) {
+        return raw < 10_000_000_000 ? raw * 1000 : raw;
+    }
+
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getEventTimestampMs(message) {
+    if (!message || typeof message !== 'object') return 0;
+    return toTimestampMs( message.timestamp || message.serverTimestamp ||  message.messageTimestamp || message.createdAt || message.sentAt );
+}
+
+function isHistoryReplayEvent(message) {
+    if (!message || typeof message !== 'object') return false;
+    const data = message.data || message.payload || {};
+    return Boolean(  message.isHistory ||message.isReplay ||  message.isPreloaded || message.preloaded || message.replay || message.__history || message.__replay || data.isHistory || data.isReplay || data.isPreloaded || data.preloaded || data.replay || data.__history || data.__replay);
+}
+
+function extractIdFromJid(value) {
+    const match = String(value || '').match(/^(\d+)/);
+    return match ? match[1] : '';
+}
+
+function normalizeIncomingEvent(input) {
+    if (!input || typeof input !== 'object') return input;
+
+    const message = { ...input };
+    if (!message.body) {
+        const bodyCandidate = message.text || message.message || message.content || message.messageText || message.snippet;
+        if (typeof bodyCandidate === 'string') message.body = bodyCandidate;
+    }
+
+    if (!message.threadID) {
+        const threadID = message.threadId || message.thread_id || extractIdFromJid(message.chatJid || message.threadJid);
+        if (threadID) message.threadID = String(threadID);
+    }
+    if (!message.senderID) {
+        const senderID = message.senderId || message.sender_id || message.author || message.from || extractIdFromJid(message.senderJid || message.userJid);
+        if (senderID) message.senderID = String(senderID);
+    }
+    if (!message.messageID) {
+        const messageID = message.messageId || message.message_id || message.mid || message.id;
+        if (messageID) message.messageID = String(messageID);
+    }
+
+    const normalizedType = String(message.type || '').toLowerCase();
+    if (
+        ['e2eemessage', 'e2ee_message', 'new_message', 'message_new', 'messaging_message'].includes(normalizedType) ||
+        (!message.type && message.threadID && message.senderID && message.body)
+    ) {
+        message.type = message.messageReply ? 'message_reply' : 'message';
+    }
+
+    return message;
+}
 
 module.exports = function ({ api }) {
     const [hEvent, hReaction, hReply, hCmdEvent, hCmd, hRefresh] = ['Event', 'Reaction', 'Reply', 'CommandEvent', 'Command', 'Refresh'].map(t => require(`./handle/handle${t}`)({ api }));
     const rentScheduler = new RentScheduler(api); rentScheduler.start(); global.rentScheduler = rentScheduler;
+    let logoutExitStarted = false;
+    const listenStartedAt = Date.now();
+    const historyCutoffAt = listenStartedAt - 5000;
+
+    async function exitAfterLogout(restartMessage) {
+        if (logoutExitStarted) return;
+        logoutExitStarted = true;
+
+        if (isAutologEnabled(global.config)) {
+            console.log(restartMessage || '[Listen] Auto-login enabled. Restarting...');
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    console.log(`[Listen] Auto-login attempt ${attempt}/3...`);
+                    const autoData = await performAutoLogin(global.config);
+                    await performAutoLogin.saveSession(global.config, autoData);
+                    process.exit(1);
+                    return;
+                } catch (error) {
+                    console.error(`[Listen] Auto-login attempt ${attempt}/3 failed:`, error.message);
+                    if (attempt < 3) {
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                    }
+                }
+            }
+
+            console.error('[Listen] Auto-login failed after 3 attempts. Stopping worker.');
+            process.exit(0);
+        } else {
+            console.error('[Listen] Auto-login disabled. Exiting process.');
+            process.exit(0);
+        }
+    }
 
     setInterval(async () => {
         try {
             const toSend = messageCounter.checkScheduledNoti();
-            for (const { threadID, type } of toSend) {
+            for (const { threadID, type, slotKey } of toSend) {
                 try {
+                    if (messageCounter.markNotiAsSending && !messageCounter.markNotiAsSending(threadID, type, slotKey)) continue;
                     const topStats = messageCounter.getTopStats(threadID, 10), stats = topStats[type];
-                    if (!stats || stats.list.length === 0) { messageCounter.markNotiAsSent(threadID, type); continue; }
+                    if (!stats || stats.list.length === 0) { messageCounter.markNotiAsSent(threadID, type, slotKey); continue; }
                     const threadInfo = await api.getThreadInfo(threadID);
                     let message = `━━ Top tương tác ${type === 'day' ? 'ngày' : type === 'week' ? 'tuần' : 'tháng'} ━━\n`, total = stats.total;
                     for (let i = 0; i < stats.list.length; i++) {
@@ -25,34 +146,47 @@ module.exports = function ({ api }) {
                         message += `★ Top1: ${top1Name} (${stats.top1.count})\n`;
                     }
                     await api.sendMessage(message, threadID);
-                    messageCounter.resetCounter(threadID, type); messageCounter.markNotiAsSent(threadID, type);
-                } catch (error) { console.error(`Error sending stats for ${threadID}:`, error); }
+                    messageCounter.resetCounter(threadID, type); messageCounter.markNotiAsSent(threadID, type, slotKey);
+                } catch (error) {
+                    if (messageCounter.markNotiAsFailed) messageCounter.markNotiAsFailed(threadID, type, slotKey, error);
+                    const errorCode = error && error.code ? ` (${error.code})` : '';
+                    const errorMessage = error && error.message ? error.message : String(error || '');
+                    console.error(`[TopTT] Send failed for ${threadID}/${type}: ${errorMessage}${errorCode}`);
+                }
             }
         } catch (e) { console.error("Error in stats interval:", e); }
     }, 60000);
 
-    api.ws.on('*', async (message) => {
+    api.ws.on('*', async (rawMessage) => {
+        const message = normalizeIncomingEvent(rawMessage);
         const event = message;
         try {
             if (['connected', 'api_response'].includes(message.type)) return;
+            const logoutSignal = getLogoutSignal(message);
+            if (logoutSignal) {
+                console.error('[Listen] Detected FCA logout/error:', logoutSignal.reason);
+                await exitAfterLogout('[Listen] Auto-login enabled. Restarting...');
+                return;
+            }
             if (message.type === 'system_event' && ['logout', 'error_critical'].includes(message.dataType)) {
                 console.error('[Listen] Received system logout/error:', message.data);
-                if (global.config.status) { console.log('[Listen] Auto-login enabled. Restarting...'); process.exit(1); }
-                else console.error('[Listen] ⚠️ Auto-login disabled.'); return;
+                await exitAfterLogout('[Listen] Auto-login enabled. Restarting...'); return;
             }
             if (message.type === 'mqtt_error' && (message.error.includes('Connection refused') || message.error.includes('Logged out') || message.code === 3)) {
                 console.error('[Listen] MQTT Error/Logged Out');
-                if (global.config.status) { console.log('[Listen] Restarting...'); process.exit(1); } return;
+                await exitAfterLogout('[Listen] Restarting...'); return;
             }
             if (message.logMessageType === 'log:logout') {
                 console.error('[Listen] Received API logout event. Reason:', message.reason);
-                if (global.config.status) {
-                    console.log('[Listen] Auto-login enabled. Restarting...');
-                    process.exit(1);
-                } else {
-                    console.error('[Listen] Auto-login disabled. Exiting process.');
-                    process.exit(0);
-                }
+                await exitAfterLogout('[Listen] Auto-login enabled. Restarting...');
+                return;
+            }
+            const isReplay = isHistoryReplayEvent(message);
+            if (!isReplay) {
+               // console.log(event);
+            }
+            const eventTimestamp = getEventTimestampMs(message);
+            if (isReplay || (eventTimestamp > 0 && eventTimestamp < historyCutoffAt)) {
                 return;
             }
             if ((message.type === "message" || message.type === "message_reply") && message.senderID && message.threadID && message.senderID != api.getCurrentUserID()) {
@@ -67,32 +201,31 @@ module.exports = function ({ api }) {
                 try {
                     const { body, threadID, senderID, messageID } = message, keyPrefix = global.config.RENTKEY || 'banana';
                     if (body && body.startsWith(keyPrefix)) {
-                        const keyPath = path.resolve(__dirname, 'data/keyData.json'), rentPath = path.resolve(__dirname, 'data/rentData.json');
-                        if (fs.existsSync(keyPath) && fs.existsSync(rentPath)) {
-                            const keyData = JSON.parse(fs.readFileSync(keyPath, 'utf8')), rentData = JSON.parse(fs.readFileSync(rentPath, 'utf8')), key = body.trim();
-                            if (keyData.keys[key]) {
-                                const keyInfo = keyData.keys[key];
-                                if (keyInfo.used) return api.sendMessage(`✗ Key đã dùng!\n• Nhóm: ${keyInfo.usedThread}\n• Thời gian: ${keyInfo.usedTime}`, threadID, messageID);
-                                let threadName = "Unknown";
-                                try { const ti = await api.getThreadInfo(threadID); threadName = ti.threadName || ti.name || "Nhóm"; } catch (e) { }
-                                const now = Date.now(), daysInMs = keyInfo.days * 86400000, timeFmt = "HH:mm:ss DD/MM/YYYY";
+                        const keyData = store.getJson('keyData', 'default', { keys: {} });
+                        const rentData = store.getJson('rentData', 'default', { threads: {} });
+                        const key = body.trim();
+                        if (keyData.keys[key]) {
+                            const keyInfo = keyData.keys[key];
+                            if (keyInfo.used) return api.sendMessage(`✗ Key đã dùng!\n• Nhóm: ${keyInfo.usedThread}\n• Thời gian: ${keyInfo.usedTime}`, threadID, messageID);
+                            let threadName = "Unknown";
+                            try { const ti = await api.getThreadInfo(threadID); threadName = ti.threadName || ti.name || "Nhóm"; } catch (e) { }
+                            const now = Date.now(), daysInMs = keyInfo.days * 86400000, timeFmt = "HH:mm:ss DD/MM/YYYY";
 
-                                if (!rentData.threads[threadID]) {
-                                    rentData.threads[threadID] = { startDate: now, endDate: now + daysInMs, days: keyInfo.days, threadName, addedBy: senderID, addedTime: moment.tz("Asia/Ho_Chi_Minh").format(timeFmt) };
-                                    fs.writeFileSync(rentPath, JSON.stringify(rentData, null, 2));
-                                    Object.assign(keyData.keys[key], { used: true, usedBy: senderID, usedTime: moment.tz("Asia/Ho_Chi_Minh").format(timeFmt), usedThread: threadName });
-                                    fs.writeFileSync(keyPath, JSON.stringify(keyData, null, 2));
-                                    if (global.rentScheduler) await global.rentScheduler.updateNickname(threadID);
-                                    return api.sendMessage(`✓ Kích hoạt!\n• Nhóm: ${threadName}\n• Hạn: ${keyInfo.days} ngày\n• Hết: ${moment(now + daysInMs).tz("Asia/Ho_Chi_Minh").format("DD/MM/YYYY HH:mm:ss")}`, threadID, messageID);
-                                } else {
-                                    const newEnd = rentData.threads[threadID].endDate + daysInMs, totalDays = Math.ceil((newEnd - now) / 86400000);
-                                    Object.assign(rentData.threads[threadID], { endDate: newEnd, days: totalDays, threadName });
-                                    fs.writeFileSync(rentPath, JSON.stringify(rentData, null, 2));
-                                    Object.assign(keyData.keys[key], { used: true, usedBy: senderID, usedTime: moment.tz("Asia/Ho_Chi_Minh").format(timeFmt), usedThread: threadName });
-                                    fs.writeFileSync(keyPath, JSON.stringify(keyData, null, 2));
-                                    if (global.rentScheduler) await global.rentScheduler.updateNickname(threadID);
-                                    return api.sendMessage(`✓ Gia hạn!\n• Nhóm: ${threadName}\n• Thêm: ${keyInfo.days} ngày\n• Tổng: ${totalDays} ngày\n• Hết: ${moment(newEnd).tz("Asia/Ho_Chi_Minh").format("DD/MM/YYYY HH:mm:ss")}`, threadID, messageID);
-                                }
+                            if (!rentData.threads[threadID]) {
+                                rentData.threads[threadID] = { startDate: now, endDate: now + daysInMs, days: keyInfo.days, threadName, addedBy: senderID, addedTime: moment.tz("Asia/Ho_Chi_Minh").format(timeFmt) };
+                                Object.assign(keyData.keys[key], { used: true, usedBy: senderID, usedTime: moment.tz("Asia/Ho_Chi_Minh").format(timeFmt), usedThread: threadName });
+                                store.setJson('rentData', 'default', rentData);
+                                store.setJson('keyData', 'default', keyData);
+                                if (global.rentScheduler) await global.rentScheduler.updateNickname(threadID);
+                                return api.sendMessage(`✓ Kích hoạt!\n• Nhóm: ${threadName}\n• Hạn: ${keyInfo.days} ngày\n• Hết: ${moment(now + daysInMs).tz("Asia/Ho_Chi_Minh").format("DD/MM/YYYY HH:mm:ss")}`, threadID, messageID);
+                            } else {
+                                const newEnd = rentData.threads[threadID].endDate + daysInMs, totalDays = Math.ceil((newEnd - now) / 86400000);
+                                Object.assign(rentData.threads[threadID], { endDate: newEnd, days: totalDays, threadName });
+                                Object.assign(keyData.keys[key], { used: true, usedBy: senderID, usedTime: moment.tz("Asia/Ho_Chi_Minh").format(timeFmt), usedThread: threadName });
+                                store.setJson('rentData', 'default', rentData);
+                                store.setJson('keyData', 'default', keyData);
+                                if (global.rentScheduler) await global.rentScheduler.updateNickname(threadID);
+                                return api.sendMessage(`✓ Gia hạn!\n• Nhóm: ${threadName}\n• Thêm: ${keyInfo.days} ngày\n• Tổng: ${totalDays} ngày\n• Hết: ${moment(newEnd).tz("Asia/Ho_Chi_Minh").format("DD/MM/YYYY HH:mm:ss")}`, threadID, messageID);
                             }
                         }
                     }

@@ -1,6 +1,3 @@
-const fs = require('fs');
-const path = require('path');
-
 module.exports = {
     config: {
         name: "setunsend",
@@ -14,15 +11,11 @@ module.exports = {
         role: 1 
     },
 
-    onRun: async function({ api, event, args, permssion }) {
+    onRun: async function({ api, event, args, permssion, database }) {
         const { threadID, messageID, senderID } = event;
-        const settingsPath = path.join(process.cwd(), 'main/data/unsendSettings.json');
 
         try {
-            let settings = { threads: {} };
-            if (fs.existsSync(settingsPath)) {
-                settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-            }
+            let settings = database.get.json('unsendSettings', 'default', { threads: {} });
             if (args.length === 0) {
                 const currentIcon = settings.threads[threadID]?.icon;
                 if (currentIcon) {
@@ -86,8 +79,7 @@ module.exports = {
             }
             if (input.toLowerCase() === 'off') {
                 if (settings.threads[threadID]) {
-                    delete settings.threads[threadID];
-                    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+                    database.delete.threadSetting('unsendSettings', threadID);
                     return api.sendMessage(
                         `✅ Đã tắt auto unsend reaction`,
                         threadID,
@@ -109,13 +101,11 @@ module.exports = {
                     messageID
                 );
             }
-            settings.threads[threadID] = {
+            database.update.threadSetting('unsendSettings', threadID, {
                 icon: icon,
                 setBy: senderID,
                 setAt: new Date().toISOString()
-            };
-
-            fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+            });
 
             return api.sendMessage(
                 `✅ Đã set auto unsend\n` +

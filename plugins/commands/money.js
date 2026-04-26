@@ -1,6 +1,3 @@
-const fs = require('fs');
-const path = require('path');
-
 module.exports = {
     config: {
         name: "money",
@@ -103,26 +100,17 @@ module.exports = {
                 
                 if (type === 'box') {
                     if (!isGroupAdmin && !isBotAdmin) return api.sendMessage("⚠️ Chỉ QTV nhóm mới được reset!", threadID, messageID);
-                    
-                    const filePath = path.join(process.cwd(), 'main/data/money', `${threadID}.json`);
-                    if (fs.existsSync(filePath)) {
-                        fs.unlinkSync(filePath);
-                        return api.sendMessage("✅ Đã reset toàn bộ tiền của nhóm này về 0!", threadID, messageID);
-                    } else {
-                        return api.sendMessage("⚠️ Nhóm này chưa có dữ liệu tiền tệ!", threadID, messageID);
-                    }
+                    const changed = await money.resetThread();
+                    return api.sendMessage(
+                        changed > 0 ? "✅ Đã reset toàn bộ tiền của nhóm này về 0!" : "⚠️ Nhóm này chưa có dữ liệu tiền tệ!",
+                        threadID,
+                        messageID
+                    );
 
                 } else if (type === 'all') {
                     if (!NDH.includes(senderID)) return api.sendMessage("⚠️ Chỉ Admin chính mới được reset all!", threadID, messageID);
-                    
-                    const moneyDir = path.join(process.cwd(), 'main/data/money');
-                    try {
-                        fs.rmSync(moneyDir, { recursive: true, force: true });
-                        fs.mkdirSync(moneyDir, { recursive: true });
-                        return api.sendMessage("✅ Đã reset toàn bộ hệ thống tiền tệ server!", threadID, messageID);
-                    } catch (e) {
-                        return api.sendMessage(` Lỗi khi reset: ${e.message}`, threadID, messageID);
-                    }
+                    await money.resetAll();
+                    return api.sendMessage("✅ Đã reset toàn bộ hệ thống tiền tệ server!", threadID, messageID);
 
                 } else {
                     return api.sendMessage("⚠️ Dùng: money reset box HOẶC money reset all", threadID, messageID);
@@ -131,10 +119,7 @@ module.exports = {
             // === TOP (BXH) ===
             case 'top':
                 try {
-                     const filePath = path.join(process.cwd(), 'main/data/money', `${threadID}.json`);
-                     if (!fs.existsSync(filePath)) return api.sendMessage("⚠️ Nhóm chưa có dữ liệu tiền!", threadID, messageID);
-                     
-                     const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                     const data = await money.getBoxData();
                      const sorted = Object.entries(data).sort(([, a], [, b]) => b - a).slice(0, 10);
                      
                      if (sorted.length === 0) return api.sendMessage("⚠️ Không có dữ liệu!", threadID, messageID);

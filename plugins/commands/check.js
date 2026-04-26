@@ -1,6 +1,103 @@
 const messageCounter = require('../../main/utils/messageCounter');
 const moment = require('moment-timezone');
 
+function isGenericUserName(name) {
+    const text = String(name || '').trim().toLowerCase();
+    return !text || text === 'facebook user' || text === 'user' || text === 'unknown user' || text === 'Người dùng Facebook' || text === 'người dùng';
+}
+
+function collectFetchedUsers(value, output) {
+    if (!value) return;
+    if (Array.isArray(value)) {
+        value.forEach(item => collectFetchedUsers(item, output));
+        return;
+    }
+    if (typeof value !== 'object') return;
+
+    if (value.id && value.name) {
+        output.set(String(value.id), value);
+    }
+
+    for (const [key, item] of Object.entries(value)) {
+        if (item && typeof item === 'object') {
+            const user = { id: item.id || key, ...item };
+            if (user.id && user.name) {
+                output.set(String(user.id), user);
+            }
+        }
+    }
+}
+
+async function hydrateDisplayNames(api, threadInfo, userIDs) {
+    const nameMap = new Map();
+    const missing = [];
+    const users = Array.isArray(threadInfo.userInfo) ? threadInfo.userInfo : [];
+
+    for (const userID of userIDs) {
+        const id = String(userID);
+        const user = users.find(item => String(item.id) === id);
+        if (user && user.name && !isGenericUserName(user.name)) {
+            nameMap.set(id, user.name);
+        } else {
+            missing.push(id);
+        }
+    }
+
+    if (missing.length > 0 && typeof api.getUserInfo === 'function') {
+        try {
+            const fetched = await api.getUserInfo(Array.from(new Set(missing)));
+            const fetchedUsers = new Map();
+            collectFetchedUsers(fetched, fetchedUsers);
+            for (const id of missing) {
+                const user = fetchedUsers.get(String(id));
+                if (user && user.name && !isGenericUserName(user.name)) {
+                    nameMap.set(String(id), user.name);
+                }
+            }
+        } catch (_) { }
+    }
+
+    return nameMap;
+}
+
+function normalizeIDList(values) {
+    return Array.from(new Set(
+        (Array.isArray(values) ? values : [])
+            .map(value => String(value || '').trim())
+            .filter(Boolean)
+    ));
+}
+
+function getStoredUserIDs(threadData) {
+    return normalizeIDList(Object.keys((threadData && threadData.users) || {}));
+}
+
+function shouldTrustParticipantList(threadInfo, threadData) {
+    const participantIDs = normalizeIDList(threadInfo && threadInfo.participantIDs);
+    const storedUserIDs = getStoredUserIDs(threadData);
+
+    if (participantIDs.length === 0) {
+        return false;
+    }
+
+    if (!threadInfo || !threadInfo.isGroup || storedUserIDs.length === 0) {
+        return true;
+    }
+
+    return participantIDs.length + 5 >= storedUserIDs.length;
+}
+
+function getEffectiveParticipantIDs(threadInfo, threadData) {
+    const participantIDs = normalizeIDList(threadInfo && threadInfo.participantIDs);
+    const storedUserIDs = getStoredUserIDs(threadData);
+
+    if (shouldTrustParticipantList(threadInfo, threadData)) {
+        return participantIDs.length > 0 ? participantIDs : storedUserIDs;
+    }
+
+    return Array.from(new Set(storedUserIDs.concat(participantIDs)));
+}
+
 module.exports = {
     config: {
         name: "check",
@@ -38,7 +135,10 @@ module.exports = {
                     return api.sendMessage(' Chỉ QTV mới dùng được lệnh này', threadID, messageID);
                 }
 
-                const threadInfo = await api.getThreadInfo(threadID);
+                const threadInfo = await api.getThreadInfo({
+                    threadID,
+                    forceRefresh: true
+                });
                 const botIsAdmin = threadInfo.adminIDs.some(item => item.id == api.getCurrentUserID());
                 
                 if (!botIsAdmin) {
@@ -51,7 +151,7 @@ module.exports = {
 
                 const minCount = parseInt(args[1]);
                 const threadData = messageCounter.getThreadData(threadID);
-                const allUser = threadInfo.participantIDs;
+                const allUser = getEffectiveParticipantIDs(threadInfo, threadData);
                 const id_rm = [];
 
                 for (const user of allUser) {
@@ -74,7 +174,7 @@ module.exports = {
                 if (id_rm.length > 0) {
                     let removedMsg = '';
                     for (let i = 0; i < id_rm.length; i++) {
-                        const userInfo = threadInfo.userInfo.find(u => u.id === id_rm[i]);
+                        const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(id_rm[i]));
                         const name = userInfo?.name || 'Facebook User';
                         removedMsg += `${i + 1}. ${name}\n`;
                     }
@@ -89,7 +189,11 @@ module.exports = {
             }
             if (query === 'hd') {
                 const threadData = messageCounter.getThreadData(threadID);
-                const threadInfo = await api.getThreadInfo(threadID);
+                const threadInfo = await api.getThreadInfo({
+                    threadID,
+                    forceRefresh: true
+                });
+                const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
                 
                 const getTimeAgo = (timestamp) => {
                     if (!timestamp) return 'Chưa có';
@@ -115,9 +219,9 @@ module.exports = {
                 };
 
                 const allUsers = [];
-                for (const userID of threadInfo.participantIDs) {
+                for (const userID of participantIDs) {
                     const data = threadData.users[userID];
-                    const userInfo = threadInfo.userInfo.find(u => u.id === userID);
+                    const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(userID));
                     
                     if (userInfo) {
                         allUsers.push({
@@ -160,15 +264,19 @@ module.exports = {
                 }
 
                 const threadData = messageCounter.getThreadData(threadID);
-                const threadInfo = await api.getThreadInfo(threadID);
+                const threadInfo = await api.getThreadInfo({
+                    threadID,
+                    forceRefresh: true
+                });
+                const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
                 
                 const lowInteractionUsers = [];
-                for (const userID of threadInfo.participantIDs) {
+                for (const userID of participantIDs) {
                     const data = threadData.users[userID];
                     const dayCount = data?.day || 0;
                     
                     if (dayCount < 10) {
-                        const userInfo = threadInfo.userInfo.find(u => u.id === userID);
+                        const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(userID));
                         if (userInfo) {
                             lowInteractionUsers.push({
                                 id: userID,
@@ -214,17 +322,23 @@ module.exports = {
                     return api.sendMessage(' Chỉ QTV mới dùng được lệnh này', threadID, messageID);
                 }
 
-                const threadInfo = await api.getThreadInfo(threadID);
+                const threadInfo = await api.getThreadInfo({
+                    threadID,
+                    forceRefresh: true
+                });
                 const botIsAdmin = threadInfo.adminIDs.some(item => item.id == api.getCurrentUserID());
                 
                 if (!botIsAdmin) {
                     return api.sendMessage(' Bot cần quyền QTV!', threadID, messageID);
                 }
 
-                const fbUsers = threadInfo.participantIDs.filter(id => {
-                    const userInfo = threadInfo.userInfo.find(u => u.id === id);
-                    return userInfo && userInfo.gender === undefined;
-                });
+                const fbUsers = threadInfo.userInfo
+                    .filter(userInfo => (
+                        userInfo
+                        && String(userInfo.id) !== String(api.getCurrentUserID())
+                        && isGenericUserName(userInfo.name)
+                    ))
+                    .map(userInfo => String(userInfo.id));
 
                 if (fbUsers.length === 0) {
                     return api.sendMessage("🔎 Nhóm không có người dùng Facebook", threadID, messageID);
@@ -241,23 +355,29 @@ module.exports = {
                 return;
             }
             if (query === 'box') {
-                const threadInfo = await api.getThreadInfo(threadID);
-                messageCounter.syncWithParticipants(threadID, threadInfo.participantIDs);               
-                const threadData = messageCounter.getThreadData(threadID);               
-                const totalDay = threadInfo.participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.day || 0), 0);
-                const totalWeek = threadInfo.participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.week || 0), 0);
-                const totalMonth = threadInfo.participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.month || 0), 0);
-                const totalAll = threadInfo.participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.total || 0), 0);
+                const threadInfo = await api.getThreadInfo({
+                    threadID,
+                    forceRefresh: true
+                });
+                const threadData = messageCounter.getThreadData(threadID);
+                const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
+                if (participantIDs.length > 0) {
+                    messageCounter.initializeAllMembers(threadID, participantIDs);
+                }
+                const totalDay = participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.day || 0), 0);
+                const totalWeek = participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.week || 0), 0);
+                const totalMonth = participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.month || 0), 0);
+                const totalAll = participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.total || 0), 0);
 
                 const gendernam = threadInfo.userInfo.filter(u => u.gender === "MALE").length;
                 const gendernu = threadInfo.userInfo.filter(u => u.gender === "FEMALE").length;
                 const adminNames = [];
                 for (const admin of threadInfo.adminIDs) {
-                    const userInfo = threadInfo.userInfo.find(u => u.id === admin.id);
+                    const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(admin.id));
                     adminNames.push(userInfo?.name || 'Facebook User');
                 }
 
-                const threadMem = threadInfo.participantIDs.length;
+                const threadMem = participantIDs.length;
                 const icon = threadInfo.emoji || "👍";
                 const threadName = threadInfo.threadName || "Không có tên";
                 const pd = threadInfo.approvalMode ? "Bật" : "Tắt";
@@ -398,14 +518,18 @@ module.exports = {
             if (['day', 'week', 'month', 'all'].includes(query)) {
                 const type = query;
                 const threadInfo = await api.getThreadInfo(threadID);
-                messageCounter.syncWithParticipants(threadID, threadInfo.participantIDs);
+                const threadData = messageCounter.getThreadData(threadID);
+                const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
+                if (participantIDs.length > 0) {
+                    messageCounter.initializeAllMembers(threadID, participantIDs);
+                }
 
                 const topStats = messageCounter.getTopStats(threadID, 999);
                 const stats = type === 'all' ? topStats.total : topStats[type];
                 
                 // Chệ lấy users trong participantIDs
                 if (stats && stats.list) {
-                    stats.list = stats.list.filter(item => threadInfo.participantIDs.includes(item.userID));
+                    stats.list = stats.list.filter(item => participantIDs.includes(String(item.userID)));
                     // Cập nhật lại rank và total
                     stats.list.forEach((item, index) => item.rank = index + 1);
                     stats.total = stats.list.reduce((sum, item) => sum + item.count, 0);
@@ -430,10 +554,11 @@ module.exports = {
 
                 const total = stats.total;
                 const displayList = stats.list; 
+                const displayNameMap = await hydrateDisplayNames(api, threadInfo, displayList.map(item => item.userID));
                 for (let i = 0; i < displayList.length; i++) {
                     const item = displayList[i];
-                    const userInfo = threadInfo.userInfo.find(u => u.id === item.userID);
-                    const userName = userInfo?.name || 'Facebook User';
+                    const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(item.userID));
+                    const userName = displayNameMap.get(String(item.userID)) || userInfo?.name || 'Facebook User';
                     
                     const symbol = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '  ';
                     message += `${symbol} ${item.rank}. ${userName} - ${item.count}\n`;
@@ -444,8 +569,8 @@ module.exports = {
                 message += `🏆 Bạn đứng thứ ${userRank + 1}/${stats.list.length} với ${userMessages} tin nhắn\n`;
                 
                 if (stats.top1) {
-                    const top1Info = threadInfo.userInfo.find(u => u.id === stats.top1.userID);
-                    const top1Name = top1Info?.name || 'Facebook User';
+                    const top1Info = threadInfo.userInfo.find(u => String(u.id) === String(stats.top1.userID));
+                    const top1Name = displayNameMap.get(String(stats.top1.userID)) || top1Info?.name || 'Facebook User';
                     message += `👑 Top 1: ${top1Name} (${stats.top1.count})\n`;
                 }
                 
@@ -467,23 +592,26 @@ module.exports = {
             let targetName = "Bạn";
 
             const threadInfo = await api.getThreadInfo(threadID);
+            const threadData = messageCounter.getThreadData(threadID);
+            const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
             
             if (messageReply) {
                 targetID = messageReply.senderID;
-                const userInfo = threadInfo.userInfo.find(u => u.id === targetID);
+                const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(targetID));
                 targetName = userInfo?.name || "User";
             } else if (Object.keys(mentions).length > 0) {
                 targetID = Object.keys(mentions)[0];
                 targetName = mentions[targetID];
             } else {
-                const userInfo = threadInfo.userInfo.find(u => u.id === senderID);
+                const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(senderID));
                 targetName = userInfo?.name || "Bạn";
             }
             
-            messageCounter.syncWithParticipants(threadID, threadInfo.participantIDs);
+            if (participantIDs.length > 0) {
+                messageCounter.initializeAllMembers(threadID, participantIDs);
+            }
             const stats = messageCounter.getStats(threadID, targetID);
-            const threadData = messageCounter.getThreadData(threadID);
-            const totalDay = threadInfo.participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.day || 0), 0);
+            const totalDay = participantIDs.reduce((sum, id) => sum + (threadData.users[id]?.day || 0), 0);
             const userInteractionRate = totalDay > 0 ? ((stats.user.day / totalDay) * 100).toFixed(2) : 0;
 
             let permission = "Thành viên";
@@ -558,7 +686,7 @@ module.exports = {
                 
                 if (user && user.userID) {
                     try {
-                        const userInfo = threadInfo.userInfo.find(u => u.id === user.userID);
+                        const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(user.userID));
                         const userName = userInfo?.name || 'User';
                         
                         await api.removeFromGroup(user.userID, threadID);
@@ -583,14 +711,18 @@ module.exports = {
             if (userID !== $.author) return;
             if (reaction !== "😆") return;
             const threadInfo = await api.getThreadInfo(threadID);
-            messageCounter.syncWithParticipants(threadID, threadInfo.participantIDs);
+            const threadData = messageCounter.getThreadData(threadID);
+            const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
+            if (participantIDs.length > 0) {
+                messageCounter.initializeAllMembers(threadID, participantIDs);
+            }
 
             const topStats = messageCounter.getTopStats(threadID, 999);
             const stats = topStats.total;
             
             // Chỉ lấy users trong participantIDs
             if (stats && stats.list) {
-                stats.list = stats.list.filter(item => threadInfo.participantIDs.includes(item.userID));
+                stats.list = stats.list.filter(item => participantIDs.includes(String(item.userID)));
                 stats.list.forEach((item, index) => item.rank = index + 1);
                 stats.total = stats.list.reduce((sum, item) => sum + item.count, 0);
                 if (stats.list.length > 0) {
@@ -602,7 +734,7 @@ module.exports = {
                 return api.sendMessage('📊 Chưa có dữ liệu', threadID, messageID);
             }
 
-            const targetUserInfo = threadInfo.userInfo.find(u => u.id === $.targetID);
+            const targetUserInfo = threadInfo.userInfo.find(u => String(u.id) === String($.targetID));
             const targetName = targetUserInfo?.name || 'User';
             const userRank = stats.list.findIndex(item => item.userID === $.targetID);
             const userMessages = stats.list[userRank]?.count || 0;
@@ -614,7 +746,7 @@ module.exports = {
             const displayList = stats.list;
             for (let i = 0; i < displayList.length; i++) {
                 const item = displayList[i];
-                const userInfo = threadInfo.userInfo.find(u => u.id === item.userID);
+                const userInfo = threadInfo.userInfo.find(u => String(u.id) === String(item.userID));
                 const userName = userInfo?.name || 'Facebook User';
                 
                 const emoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '  ';

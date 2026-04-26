@@ -1,23 +1,19 @@
 
 const utils = require("../utils/log");
-const fs = require("fs");
-const path = require("path");
+const store = require("../utils/database");
 
 module.exports = function ({ api }) {
   return async function ({ event }) {
     const { onReaction, commands } = global.concac;
     const { messageID, threadID, reaction, userID, senderID } = event;
     try {
-      const settingsPath = path.resolve(__dirname, '../data/unsendSettings.json');
-      if (fs.existsSync(settingsPath)) {
-        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        const threadSettings = settings.threads[threadID];
+      const settings = store.getJson('unsendSettings', 'default', {});
+      const threadSettings = settings.threads?.[threadID];
 
-        if (threadSettings && threadSettings.icon === reaction) {
-          await api.unsendMessage(messageID);
-          //utils(`Auto unsend message ${messageID} in thread ${threadID} by reaction ${reaction}`, 'info');
-          return;
-        }
+      if (threadSettings && threadSettings.icon === reaction) {
+        await api.unsendMessage(messageID);
+        //utils(`Auto unsend message ${messageID} in thread ${threadID} by reaction ${reaction}`, 'info');
+        return;
       }
     } catch (error) {
       console.error('Auto unsend reaction error:', error);
@@ -40,9 +36,12 @@ module.exports = function ({ api }) {
         addMoney: (userID, amount) => money.addMoney(threadID, userID, amount),
         subtractMoney: (userID, amount) => money.subtractMoney(threadID, userID, amount),
         setMoney: (userID, amount) => money.setMoney(threadID, userID, amount),
-        pay: (userID, receiverID, amount) => money.pay(threadID, userID, receiverID, amount)
+        pay: (userID, receiverID, amount) => money.pay(threadID, userID, receiverID, amount),
+        getBoxData: () => money.getBoxData(threadID),
+        resetThread: () => money.resetThread(threadID),
+        resetAll: () => money.resetAll()
       };
-      await handleNeedExec.onReaction({ api, event, onReaction: indexOfMessage, money: Currencies });
+      await handleNeedExec.onReaction({ api, event, onReaction: indexOfMessage, money: Currencies, database: store });
       return;
     } catch (error) {
       utils(error, "error");

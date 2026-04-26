@@ -1,8 +1,22 @@
 
 
-const fs = require('fs');
-const path = require('path');
 const moment = require('moment-timezone');
+
+function getRentData(database) {
+    return database.get.json('rentData', 'default', { threads: {} });
+}
+
+function saveRentData(database, data) {
+    database.update.json('rentData', 'default', data || { threads: {} });
+}
+
+function getKeyData(database) {
+    return database.get.json('keyData', 'default', { keys: {} });
+}
+
+function saveKeyData(database, data) {
+    database.update.json('keyData', 'default', data || { keys: {} });
+}
 
 module.exports = {
     config: {
@@ -19,21 +33,10 @@ module.exports = {
         images: []
     },
 
-    onRun: async function ({ api, event, args, permssion }) {
+    onRun: async function ({ api, event, args, permssion, database }) {
         const { threadID, messageID, senderID } = event;
-        const rentDataPath = path.join(process.cwd(), 'main/data/rentData.json');
-        const keyDataPath = path.join(process.cwd(), 'main/data/keyData.json');
-
-        let rentData = { threads: {} };
-        let keyData = { keys: {} };
-
-        if (fs.existsSync(rentDataPath)) {
-            rentData = JSON.parse(fs.readFileSync(rentDataPath, 'utf8'));
-        }
-
-        if (fs.existsSync(keyDataPath)) {
-            keyData = JSON.parse(fs.readFileSync(keyDataPath, 'utf8'));
-        }
+        let rentData = getRentData(database);
+        let keyData = getKeyData(database);
 
         try {
             const action = args[0]?.toLowerCase();
@@ -74,7 +77,7 @@ module.exports = {
                         addedTime: moment.tz("Asia/Ho_Chi_Minh").format("HH:mm:ss DD/MM/YYYY")
                     };
 
-                    fs.writeFileSync(rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                    saveRentData(database, rentData);
 
                     if (global.rentScheduler) {
                         global.rentScheduler.updateNickname(threadID);
@@ -99,7 +102,7 @@ module.exports = {
                     rentData.threads[threadID].days = totalDays;
                     rentData.threads[threadID].threadName = threadName;
 
-                    fs.writeFileSync(rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                    saveRentData(database, rentData);
                     if (global.rentScheduler) {
                         global.rentScheduler.updateNickname(threadID);
                     }
@@ -198,7 +201,7 @@ module.exports = {
                     usedThread: null
                 };
 
-                fs.writeFileSync(keyDataPath, JSON.stringify(keyData, null, 2), 'utf8');
+                saveKeyData(database, keyData);
 
                 return api.sendMessage(
                     `✓ Đã tạo key thành công!\n\n` +
@@ -238,7 +241,7 @@ module.exports = {
         }
     },
 
-    onReply: async function ({ api, event, onReply: $, cleanup }) {
+    onReply: async function ({ api, event, onReply: $, cleanup, database }) {
         const { threadID, messageID, senderID, body } = event;
 
         try {
@@ -246,19 +249,7 @@ module.exports = {
                 return api.sendMessage("✗ Chỉ người dùng lệnh mới reply được", threadID, messageID);
             }
 
-            const rentDataPath = path.join(process.cwd(), 'main/data/rentData.json');
-            const prefixDataPath = path.join(process.cwd(), 'main/data/prefixData.json');
-
-            let rentData = { threads: {} };
-            let prefixData = { threads: {} };
-
-            if (fs.existsSync(rentDataPath)) {
-                rentData = JSON.parse(fs.readFileSync(rentDataPath, 'utf8'));
-            }
-
-            if (fs.existsSync(prefixDataPath)) {
-                prefixData = JSON.parse(fs.readFileSync(prefixDataPath, 'utf8'));
-            }
+            let rentData = getRentData(database);
 
             const { allThreads } = $.data;
             const args = body.trim().split(/ +/);
@@ -275,8 +266,8 @@ module.exports = {
                 const targetThread = allThreads[index];
                 const tid = targetThread.tid;
 
-                delete rentData.threads[tid];
-                fs.writeFileSync(rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                database.delete.threadSetting('rentData', tid);
+                rentData = getRentData(database);
                 if (global.rentScheduler) {
                     global.rentScheduler.updateNickname(tid);
                 }
@@ -303,8 +294,8 @@ module.exports = {
                 const tid = targetThread.tid;
 
                 try {
-                    delete rentData.threads[tid];
-                    fs.writeFileSync(rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                    database.delete.threadSetting('rentData', tid);
+                    rentData = getRentData(database);
                     await api.sendMessage(
                         `⚠ Bot sẽ rời khỏi nhóm theo yêu cầu của Admin`,
                         tid
@@ -353,7 +344,7 @@ module.exports = {
                 rentData.threads[tid].days = newDaysLeft;
                 const newEndDate = moment(rentData.threads[tid].endDate).tz("Asia/Ho_Chi_Minh").format("DD/MM/YYYY");
 
-                fs.writeFileSync(rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                saveRentData(database, rentData);
                 if (global.rentScheduler) {
                     global.rentScheduler.updateNickname(tid);
                 }
@@ -396,7 +387,7 @@ module.exports = {
                         updatedCount++;
                     }
                 }
-                fs.writeFileSync(rentDataPath, JSON.stringify(rentData, null, 2), 'utf8');
+                saveRentData(database, rentData);
                 for (const item of allThreads) {
                     const tid = item.tid;
                     if (rentData.threads[tid]) {

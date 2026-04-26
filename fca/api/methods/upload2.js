@@ -12,7 +12,10 @@ module.exports = (api) => async (input, options, callback) => {
     if (!input) throw new Error("upload2: input (path/stream) is required");
 
     try {
-        const result = await api.call('upload2', input, options);
+        const threadID = options.threadID || options.threadId || options.targetThreadID || options.targetThreadId;
+        const result = threadID
+            ? await api.call('upload', input, threadID)
+            : await api.call('upload', input);
         if (callback) callback(null, result);
         return result;
     } catch (e) {

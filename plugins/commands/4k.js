@@ -10,7 +10,7 @@ module.exports = {
         name: "4k",
         version: "1.4.6",
         role: 0,
-        author: "dgk",
+        author: "",
         info: "Upscale ảnh 4K bằng cách reply ảnh",
         Category: "Box",
         guides: "Gõ '4k' sau đó reply ảnh vào tin nhắn của bot",

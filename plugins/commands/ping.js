@@ -17,8 +17,8 @@ module.exports = {
             if (event.messageReply) {
                 const repliedUserID = event.messageReply.senderID;
                 const threadInfo = await api.getThreadInfo(event.threadID);
-                const repliedUser = threadInfo.userInfo.find(u => u.id === repliedUserID);
-                const repliedUserName = repliedUser ? repliedUser.name : "User";
+                const repliedUser = threadInfo.userInfo.find(u => String(u.id) === String(repliedUserID));
+                const repliedUserName = repliedUser?.name || event.messageReply.senderName || "User";
                 
                 return api.sendMessage({ tag: `${repliedUserName}`,userID: repliedUserID,body: customMessage,method: 'taguser'}, event.threadID,event.messageID);
             }

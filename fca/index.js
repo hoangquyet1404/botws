@@ -1,67 +1,153 @@
-const axios = require('axios'), fs = require('fs'), path = require('path');
-const FCAwsClient = require('./ws/client'), FCAApi = require('./api');
-const performAutoLogin = require('../main/utils/autolog'), logger = require('../main/utils/log');
+const fs = require('fs');
+const path = require('path');
 
-const cookiePath = path.join(__dirname, '../cookie.txt'), configPath = path.join(__dirname, '../config.json');
+const FCAApi = require('./api');
+const LocalBridge = require('./ws/localBridge');
+const PrivateWsClient = require('./ws/client');
+const performAutoLogin = require('../main/utils/autolog');
+const logger = require('../main/utils/log');
+
+const cookiePath = path.join(__dirname, '../cookie.txt');
+
 const getCookieFromFile = () => fs.existsSync(cookiePath) ? fs.readFileSync(cookiePath, 'utf8').trim() : '';
 
+function sanitizeScope(value) {
+    return String(value || '').trim().replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function getSessionE2EEKey(config = {}) {
+    if (config.__e2eeSessionKey) {
+        return sanitizeScope(config.__e2eeSessionKey);
+    }
+
+    const fallback = `bot-${process.pid}-${Date.now()}`;
+    config.__e2eeSessionKey = fallback;
+    return sanitizeScope(fallback);
+}
+
+function normalizeClientVersion(config = {}) {
+    return /^fca2$/i.test(String(config.fca || config.api?.fca || '').trim()) ? 'fca2' : 'fcaPrime';
+}
+
+function normalizeError(error) {
+    if (error instanceof Error) return error;
+    return new Error(error?.message || error?.error || String(error));
+}
+
 async function saveCookieAndToken(cookie, token, config) {
-    fs.writeFileSync(cookiePath, cookie, 'utf8');
-    if (token) {
-        config.token = token;
-        try { fs.writeFileSync(configPath, JSON.stringify(config, null, 4), 'utf8'); }
-        catch (e) { logger.error(`[FCA] Token save failed: ${e.message}`); }
+    try {
+        await performAutoLogin.saveSession(config, { cookie, access_token: token });
+    } catch (error) {
+        logger.error(`[FCA] Token save failed: ${error.message}`);
     }
 }
 
-async function initFCA(config) {
-    const headers = { 'Content-Type': 'application/json', ...(config.api.key && { 'x-api-key': config.api.key }) };
-    let cookie = (await getCookieFromFile()) || config.cookie, loginRes;
-    const loginData = { cookie, facebookAccount: config.facebookAccount };
-    const fcaVer = config.api.fca || 'fca3';
+function isAutologEnabled(config = {}) {
+    return performAutoLogin.isAutologEnabled(config);
+}
 
-    try {
-        loginRes = await axios.post(`${config.api.url}/api/${fcaVer}/login`, loginData, { headers });
-        if (!loginRes.data.success) throw new Error(loginRes.data.error);
-    } catch (err) {
-        if (err.response && err.response.status === 500) logger.error('[FCA] Cookie lỗi vui lòng lấy cookie khác');
+function buildSessionPayload(config, cookie, sessionInfo = {}) {
+    return {
+        cookie,
+        token: config.token,
+        fca: normalizeClientVersion(config),
+        facebookAccount: config.facebookAccount,
+        config: {
+            sessionKey: getSessionE2EEKey(config)
+        },
+        botName: sessionInfo.botName || config.BOTNAME || 'Bot',
+        userID: sessionInfo.userID || config.facebookAccount?.email || ''
+    };
+}
 
-        if (!config.status) { logger.error('[FCA] Login failed (Auto-login disabled).'); process.exit(0); }
+async function connectRemoteSession(remoteClient, config, cookie) {
+    await remoteClient.connect(buildSessionPayload(config, cookie));
+    const sessionInfo = remoteClient.sessionInfo || {};
+    return {
+        cookie,
+        version: sessionInfo.version || normalizeClientVersion(config),
+        userID: sessionInfo.userID || config.facebookAccount?.email || '',
+        botName: sessionInfo.botName || config.BOTNAME || 'Bot'
+    };
+}
 
-        let retryCount = 0, success = false;
-        while (retryCount < 3 && !success) {
-            retryCount++;
-            logger.warn(`[FCA] Auto-login attempt ${retryCount}/3...`);
-            try {
-                const autoData = await performAutoLogin(config);
-                await saveCookieAndToken(autoData.cookie, autoData.access_token, config);
-                loginData.cookie = autoData.cookie;
-                loginRes = await axios.post(`${config.api.url}/api/${fcaVer}/login`, loginData, { headers });
-                if (loginRes.data.success) success = true; else throw new Error(loginRes.data.error);
-            } catch (e) {
-                logger.error(`[FCA] Attempt ${retryCount} failed: ${e.message}`);
-                if (retryCount >= 3) { logger.error('[FCA] Max retries reached.'); process.exit(0); }
-                await new Promise(r => setTimeout(r, 5000));
-            }
+async function bootRemoteSession(remoteClient, config) {
+    let cookie = getCookieFromFile() || config.cookie;
+    const autologEnabled = isAutologEnabled(config);
+    let lastError;
+
+    if (cookie) {
+        try {
+            return await connectRemoteSession(remoteClient, config, cookie);
+        } catch (error) {
+            lastError = normalizeError(error);
+            if (!autologEnabled) throw lastError;
+            logger.warn(`[FCA] Remote boot failed: ${lastError.message}`);
+            remoteClient.close();
+        }
+    } else if (!autologEnabled) {
+        throw new Error('Missing cookie for remote FCA session');
+    }
+
+    for (let retryCount = 1; retryCount <= 3; retryCount++) {
+        logger.warn(`[FCA] Auto-login attempt ${retryCount}/3...`);
+        try {
+            const autoData = await performAutoLogin(config);
+            cookie = autoData.cookie;
+            await saveCookieAndToken(cookie, autoData.access_token, config);
+            return await connectRemoteSession(remoteClient, config, cookie);
+        } catch (retryError) {
+            lastError = normalizeError(retryError);
+            remoteClient.close();
+            logger.error(`[FCA] Attempt ${retryCount} failed: ${lastError.message}`);
+            if (retryCount >= 3) throw performAutoLogin.createExhaustedError(lastError);
+            await new Promise(r => setTimeout(r, 5000));
         }
     }
 
-    const { sessionId, botName, userID } = loginRes.data.data;
-    logger.info(`[FCA] Logged in: ${botName} (${userID})`);
+    throw performAutoLogin.createExhaustedError(lastError || new Error('Remote FCA session failed'));
+}
 
+async function initFCA(config) {
+    const bridge = new LocalBridge();
     const apiUrl = new URL(config.api.url);
-    const wsClient = new FCAwsClient({
-        apiUrl: config.api.url, apiHost: apiUrl.hostname,
-        apiPort: apiUrl.port || (apiUrl.protocol === 'https:' ? 443 : 80), sessionId,
-        api: config.api
+    const remoteClient = new PrivateWsClient({
+        apiUrl: config.api.url,
+        wsUrl: config.api.wsUrl || config.api.wsURL || '',
+        apiHost: apiUrl.hostname,
+        apiPort: apiUrl.port || (apiUrl.protocol === 'https:' ? 443 : 80),
+        apiKey: config.api.key,
+        reconnectMinutes: config.reconnectMinutes,
+        reconnectMs: config.reconnectMs || config.reconnectMilliseconds || config.reconnectIntervalMs,
+        eventBridge: bridge
     });
 
-    await wsClient.connect();
-    const api = new FCAApi(wsClient);
-    api.loadMethods();
-    Object.assign(api, { config, botInfo: { botName, userID, sessionId } });
+    const remoteRuntime = await bootRemoteSession(remoteClient, config);
+    logger.info(`[FCA] Remote session ready: ${remoteRuntime.botName} (${remoteRuntime.userID})`);
 
-    logger.info('[FCA] System Initialized');
+    const api = new FCAApi({
+        localApi: null,
+        remoteClient,
+        eventBridge: bridge,
+        config
+    });
+
+    api.loadMethods();
+
+    Object.assign(api, {
+        config,
+        ws: bridge,
+        botInfo: {
+            botName: remoteRuntime.botName,
+            userID: remoteRuntime.userID,
+            sessionId: remoteRuntime.userID
+        },
+        localApi: null,
+        remoteClient,
+        msgEmitter: remoteClient
+    });
+
+    logger.info('[FCA] System initialized (remote private WS only)');
     return api;
 }
 

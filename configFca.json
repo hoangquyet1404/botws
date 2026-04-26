@@ -1,0 +1,25 @@
+{
+  "cookieFile": "./cookie.txt",
+  "autoReconnectMqtt": true,
+  "autoLoginOnLogout": false,
+  "browserStyleSync": true,
+  "sendTypingIndicator": true,
+  "presenceUpdateIntervalMs": 50000,
+  "syncPollIntervalMs": 5000,
+  "mqtt": {
+    "keepalive": 15,
+    "connectTimeout": 60000,
+    "reconnectPeriod": 1000
+  },
+  "reconnectWindow": {
+    "minMs": 25200000,
+    "maxMs": 43200000,
+    "maxAttempts": 5
+  },
+  "E2EE": {
+    "Enable": true,
+    "e2eeLogLevel": "error",
+    "e2eeConnectTimeoutMs": 180000,
+    "e2eeRuntimePlatform": "facebook"
+  }
+}

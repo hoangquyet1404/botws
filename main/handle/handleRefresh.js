@@ -1,9 +1,8 @@
 ﻿// handleRefresh.js - Xá»­ lÃ½ Anti-Change cho cÃ¡c event
-const fs = require("fs");
-const path = require("path");
 const moment = require("moment-timezone");
+const store = require("../utils/database");
 
-const antiSettingsPath = path.resolve(__dirname, '../data/antiSettings.json');
+const ADMIN_REFRESH_DELAY_MS = 800;
 
 function sendAntiMessage(api, message, threadID) {
     api.sendMessage(message, threadID, (err, messageInfo) => {
@@ -29,10 +28,7 @@ function sendAntiMessage(api, message, threadID) {
 
 function loadAntiSettings() {
     try {
-        if (!fs.existsSync(antiSettingsPath)) {
-            fs.writeFileSync(antiSettingsPath, JSON.stringify({ threads: {} }, null, 2));
-        }
-        return JSON.parse(fs.readFileSync(antiSettingsPath, 'utf8'));
+        return store.getJson("antiSettings", "default", { threads: {} });
     } catch (error) {
         console.error("Error loading anti settings:", error);
         return { threads: {} };
@@ -41,7 +37,7 @@ function loadAntiSettings() {
 
 function saveAntiSettings(data) {
     try {
-        fs.writeFileSync(antiSettingsPath, JSON.stringify(data, null, 2), 'utf8');
+        store.setJson("antiSettings", "default", data || { threads: {} });
         return true;
     } catch (error) {
         console.error("Error saving anti settings:", error);
@@ -52,20 +48,29 @@ function saveAntiSettings(data) {
 async function getThreadData(api, threadID) {
     try {
         const threadInfo = await api.getThreadInfo(threadID);
-        const data = {
-            threadName: threadInfo.threadName || threadInfo.name,
-            emoji: threadInfo.emoji || "\u{1F44D}",
-            themeColor: threadInfo.color,
-            themeId: threadInfo.threadThemeId || null,
-            imageSrc: threadInfo.imageSrc,
-            nicknames: threadInfo.nicknames || {},
-            adminIDs: (threadInfo.adminIDs || []).map(a => a.id || a),
-            timestamp: Date.now()
-        };
-        return data;
+        return buildThreadSnapshot(threadInfo);
     } catch (error) {
         console.error("Error getting thread data:", error);
         return null;
+    }
+}
+
+function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function getFreshThreadInfo(api, threadID, options = {}) {
+    if (options.delayMs) {
+        await wait(options.delayMs);
+    }
+
+    try {
+        return await api.getThreadInfo({
+            threadID,
+            forceRefresh: true
+        });
+    } catch {
+        return await api.getThreadInfo(threadID);
     }
 }
 
@@ -89,6 +94,45 @@ function updateThreadDataInSettings(antiSettings, threadID, field, value) {
 
     antiSettings.threads[threadID].data[field] = value;
     antiSettings.threads[threadID].data.lastUpdate = Date.now();
+}
+
+function resolveThemeEventData(logMessageData, threadInfo) {
+    return {
+        accessibilityLabel:
+            logMessageData?.accessibility_label ||
+            logMessageData?.theme_name_with_subtitle ||
+            logMessageData?.theme_name ||
+            null,
+        themeColor:
+            logMessageData?.theme_color ??
+            threadInfo?.color ??
+            threadInfo?.themeColor ??
+            null,
+        themeId:
+            logMessageData?.theme_id ??
+            threadInfo?.threadThemeId ??
+            threadInfo?.threadTheme ??
+            threadInfo?.themeID ??
+            threadInfo?.themeId ??
+            null
+    };
+}
+
+function buildThreadSnapshot(threadInfo = {}) {
+    const themeData = resolveThemeEventData({}, threadInfo);
+    return {
+        threadName: threadInfo.threadName || threadInfo.name || "",
+        emoji: threadInfo.emoji || "\u{1F44D}",
+        themeColor: themeData.themeColor,
+        themeId: themeData.themeId,
+        color: themeData.themeColor,
+        threadTheme: themeData.themeId,
+        imageSrc: threadInfo.imageSrc || threadInfo.imageURL || null,
+        nicknames: threadInfo.nicknames || {},
+        adminIDs: (threadInfo.adminIDs || []).map(a => String(a.id || a)),
+        timestamp: Date.now(),
+        lastUpdate: Date.now()
+    };
 }
 
 module.exports = function ({ api }) {
@@ -119,39 +163,23 @@ module.exports = function ({ api }) {
             const { ADMINBOT = [], NDH = [] } = global.config;
             const isAdminBot = ADMINBOT.includes(String(author)) || NDH.includes(String(author));
 
-            const threadInfo = await api.getThreadInfo(threadID);
+            const threadInfo = logMessageType === "log:thread-admins"
+                ? await getFreshThreadInfo(api, threadID, { delayMs: ADMIN_REFRESH_DELAY_MS })
+                : await api.getThreadInfo(threadID);
             if (!threadSettings.data || Object.keys(threadSettings.data).length === 0) {
-                const data = {
-                    threadName: threadInfo.threadName || threadInfo.name,
-                    emoji: threadInfo.emoji || "\u{1F44D}",
-                    themeColor: threadInfo.color,
-                    themeId: threadInfo.threadThemeId || null,
-                    imageSrc: threadInfo.imageSrc,
-                    nicknames: threadInfo.nicknames || {},
-                    adminIDs: (threadInfo.adminIDs || []).map(a => a.id || a),
-                    timestamp: Date.now()
-                };
+                const data = buildThreadSnapshot(threadInfo);
                 Object.assign(threadSettings.data, data);
                 saveAntiSettings(antiSettings);
             }
-            const threadAdmins = (threadInfo.adminIDs || []).map(a => {
-                if (typeof a === 'object' && a.id) return String(a.id);
-                return String(a);
-            });
+            const threadAdmins = normalizeAdminIDs(threadInfo.adminIDs);
             const isGroupAdmin = threadAdmins.includes(String(author));
+            const isTrustedActor = isAdminBot || (threadSettings.allowGroupAdmin === true && isGroupAdmin);
 
             const isAntiAdmin = logMessageType === "log:thread-admins" && threadSettings.enabled && threadSettings.antiAdmin;
 
-            if (!isAntiAdmin) {
-                if (isAdminBot) {
-                    updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData);
-                    return;
-                }
-
-                if (isGroupAdmin) {
-                    updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData);
-                    return;
-                }
+            if (!isAntiAdmin && isTrustedActor) {
+                await updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData, threadInfo);
+                return;
             }
 
             const time = moment.tz("Asia/Ho_Chi_Minh").format("HH:mm:ss DD/MM/YYYY");
@@ -161,7 +189,7 @@ module.exports = function ({ api }) {
                     if (!threadSettings.enabled || !threadSettings.antiJoin) break;
 
                     if (!logMessageData || !logMessageData.addedParticipants) break;
-                    if (isAdminBot || isGroupAdmin) break;
+                    if (isTrustedActor) break;
 
                     const addedParticipants = logMessageData.addedParticipants;
                     const botID = api.getCurrentUserID();
@@ -172,7 +200,7 @@ module.exports = function ({ api }) {
                         if (userID === botID) continue;
 
                         try {
-                            api.removeFromGroup(userID, threadID);
+                            await api.removeFromGroup(userID, threadID);
                             console.log(`[Anti Join] ÄÃ£ kick ${userID} khá»i nhÃ³m ${threadID}`);
                         } catch (kickErr) {
                             console.error(`[Anti Join] Lá»—i kick ${userID}:`, kickErr);
@@ -212,7 +240,7 @@ module.exports = function ({ api }) {
                     const isUserBotAdmin = ADMINBOT.includes(leftUserID) || NDH.includes(leftUserID);
                     if (isUserBotAdmin || isUserGroupAdmin) break;
                     try {
-                        api.addToGroup(leftUserID, threadID);
+                        await api.addToGroup(leftUserID, threadID);
                         console.log(`[Anti Leave] Đã thêm lại ${leftUserID} vào nhóm ${threadID}`);
 
                         const leftUser = threadInfo.userInfo.find(u => u.id === leftUserID);
@@ -253,7 +281,7 @@ module.exports = function ({ api }) {
                         saveAntiSettings(antiSettings);
                         break;
                     }
-                    if (isAdminBot || isGroupAdmin) {
+                    if (isTrustedActor) {
                         updateThreadDataInSettings(antiSettings, threadID, 'threadName', logMessageData.name);
                         saveAntiSettings(antiSettings);
                         break;
@@ -263,7 +291,7 @@ module.exports = function ({ api }) {
                     const newName = logMessageData.name;
 
                     if (oldName && newName !== oldName) {
-                        api.gcname(oldName, threadID);
+                        await api.gcname(oldName, threadID);
                         if (author !== api.getCurrentUserID()) {
                             const user = threadInfo.userInfo.find(u => u.id === author);
                             const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
@@ -284,31 +312,32 @@ module.exports = function ({ api }) {
                 }
 
                 case "log:thread-color": {
+                    const themeData = resolveThemeEventData(logMessageData, threadInfo);
                     if (!threadSettings.enabled || !threadSettings.antiColor) {
-                        updateThreadDataInSettings(antiSettings, threadID, 'themeColor', logMessageData.theme_color);
-                        updateThreadDataInSettings(antiSettings, threadID, 'themeId', logMessageData.theme_id);
-                        updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', logMessageData.accessibility_label);
+                        updateThreadDataInSettings(antiSettings, threadID, 'themeColor', themeData.themeColor);
+                        updateThreadDataInSettings(antiSettings, threadID, 'themeId', themeData.themeId);
+                        updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', themeData.accessibilityLabel);
                         saveAntiSettings(antiSettings);
-                        //console.log(`[Anti] âœ“ Updated theme data (Anti OFF) - ID: ${logMessageData.theme_id}, Color: ${logMessageData.theme_color}`);
+                        //console.log(`[Anti] âœ“ Updated theme data (Anti OFF) - ID: ${themeData.themeId}, Color: ${themeData.themeColor}`);
                         break;
                     }
-                    const oldThemeId = savedData.themeId;
-                    const newThemeId = logMessageData.theme_id;
-                    if (oldThemeId && newThemeId !== oldThemeId) {
-                        if (isAdminBot || isGroupAdmin) {
-                            updateThreadDataInSettings(antiSettings, threadID, 'themeColor', logMessageData.theme_color);
-                            updateThreadDataInSettings(antiSettings, threadID, 'themeId', logMessageData.theme_id);
-                            updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', logMessageData.accessibility_label);
+                    const oldThemeId = savedData.themeId || savedData.threadTheme || savedData.themeID || savedData.color || savedData.themeColor;
+                    const newThemeId = themeData.themeId || themeData.themeColor;
+                    if (oldThemeId && (!newThemeId || newThemeId !== oldThemeId)) {
+                        if (isTrustedActor) {
+                            updateThreadDataInSettings(antiSettings, threadID, 'themeColor', themeData.themeColor);
+                            updateThreadDataInSettings(antiSettings, threadID, 'themeId', themeData.themeId);
+                            updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', themeData.accessibilityLabel);
                             saveAntiSettings(antiSettings);
                             break;
                         }
-                        api.changeThreadColor(oldThemeId, threadID);
+                        await api.changeThreadColor(oldThemeId, threadID);
 
                         if (author !== api.getCurrentUserID()) {
                             const user = threadInfo.userInfo.find(u => u.id === author);
                             const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
                             const oldThemeName = savedData.accessibility_label || "theme cÅ©";
-                            const newThemeName = logMessageData.accessibility_label || "theme má»›i";
+                            const newThemeName = themeData.accessibilityLabel || "theme má»›i";
 
                             sendAntiMessage(
                                 api,
@@ -360,7 +389,7 @@ module.exports = function ({ api }) {
                         break;
                     }
 
-                    if (isAdminBot || isGroupAdmin) {
+                    if (isTrustedActor) {
                         if (storedEmoji !== latestEmoji) {
                             persistEmoji(latestEmoji);
                         }
@@ -375,7 +404,7 @@ module.exports = function ({ api }) {
                     const revertEmoji = savedData.emoji || defaultEmoji;
 
                     if (latestEmoji !== revertEmoji) {
-                        api.emojiMqtt(revertEmoji, threadID);
+                        await api.emojiMqtt(revertEmoji, threadID);
 
                         if (author !== api.getCurrentUserID()) {
                             const user = threadInfo.userInfo.find(u => u.id === author);
@@ -407,7 +436,7 @@ module.exports = function ({ api }) {
                         saveAntiSettings(antiSettings);
                         break;
                     }
-                    if (isAdminBot || isGroupAdmin) {
+                    if (isTrustedActor) {
                         if (!savedData.nicknames) savedData.nicknames = {};
                         savedData.nicknames[participant_id] = newNickname;
                         updateThreadDataInSettings(antiSettings, threadID, 'nicknames', savedData.nicknames);
@@ -418,7 +447,7 @@ module.exports = function ({ api }) {
                     const oldNickname = savedData.nicknames ? savedData.nicknames[participant_id] : null;
                     if (oldNickname !== newNickname && author !== api.getCurrentUserID()) {
                         try {
-                            api.setNickname(oldNickname || "", threadID, participant_id);
+                            await api.setNickname(oldNickname || "", threadID, participant_id);
 
                             const authorUser = threadInfo.userInfo.find(u => u.id === author);
                             const userName = authorUser ? authorUser.name : "NgÆ°á» i dÃ¹ng";
@@ -449,7 +478,7 @@ module.exports = function ({ api }) {
                         saveAntiSettings(antiSettings);
                         break;
                     }
-                    if (isAdminBot || isGroupAdmin) {
+                    if (isTrustedActor) {
                         updateThreadDataInSettings(antiSettings, threadID, 'imageSrc', logMessageData.url);
                         saveAntiSettings(antiSettings);
                         break;
@@ -463,7 +492,7 @@ module.exports = function ({ api }) {
                             const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
                             const axios = require('axios');
                             const imageResponse = await axios.get(oldImageSrc, { responseType: 'stream' });
-                            api.changeGroupImage(oldImageSrc, threadID);
+                            await api.changeGroupImage(oldImageSrc, threadID);
 
                             sendAntiMessage(
                                 api,
@@ -491,14 +520,24 @@ module.exports = function ({ api }) {
 
                 case "log:thread-admins": {
                     if (!threadSettings.enabled || !threadSettings.antiAdmin) {
-                        const currentAdmins = (threadInfo.adminIDs || []).map(a => String(a.id || a));
+                        const currentAdmins = normalizeAdminIDs(threadInfo.adminIDs);
+                        updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdmins);
+                        saveAntiSettings(antiSettings);
+                        break;
+                    }
+                    if (isTrustedActor) {
+                        const currentAdmins = normalizeAdminIDs(threadInfo.adminIDs);
                         updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdmins);
                         saveAntiSettings(antiSettings);
                         break;
                     }
 
                     const oldAdminIDs = savedData.adminIDs || [];
-                    const currentAdminIDs = (threadInfo.adminIDs || []).map(a => String(a.id || a));
+                    const currentAdminIDs = normalizeAdminIDs(threadInfo.adminIDs);
+                    if (oldAdminIDs.length > 0 && currentAdminIDs.length === 0) {
+                        console.warn(`[Anti Admin] Không lấy được danh sách QTV mới cho nhóm ${threadID}, bỏ qua event này.`);
+                        break;
+                    }
                     if (!savedData.adminIDs || oldAdminIDs.length === 0) {
                         updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdminIDs);
                         saveAntiSettings(antiSettings);
@@ -518,7 +557,7 @@ module.exports = function ({ api }) {
                             let violatorWasDemoted = false;
                             if (isViolatorAdmin && !isViolatorBotAdmin && violatorID !== api.getCurrentUserID()) {
                                 try {
-                                    api.changeAdminStatus(threadID, violatorID, false);
+                                    await api.changeAdminStatus(threadID, violatorID, false);
                                     violatorWasDemoted = true;
                                 } catch (demoteErr) {
                                     console.error(`[Anti Admin] Lá»—i gá»¡ QTV ngÆ°á»i vi pháº¡m:`, demoteErr);
@@ -528,14 +567,14 @@ module.exports = function ({ api }) {
                                 if (violatorWasDemoted && adminID === violatorID) {
                                     continue;
                                 }
-                                api.changeAdminStatus(threadID, adminID, false);
+                                await api.changeAdminStatus(threadID, adminID, false);
                             }
 
                             for (const adminID of removedAdmins) {
                                 if (violatorWasDemoted && adminID === violatorID) {
                                     continue;
                                 }
-                                api.changeAdminStatus(threadID, adminID, true);
+                                await api.changeAdminStatus(threadID, adminID, true);
                             }
 
                             let finalAdminIDs = [...oldAdminIDs];
@@ -600,19 +639,30 @@ module.exports = function ({ api }) {
     };
 };
 
-async function updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData) {
+function normalizeAdminIDs(adminIDs) {
+    return (Array.isArray(adminIDs) ? adminIDs : [])
+        .map(admin => {
+            if (admin && typeof admin === 'object' && admin.id) return String(admin.id);
+            return String(admin || '');
+        })
+        .filter(Boolean);
+}
+
+async function updateDataAfterEvent(api, antiSettings, threadID, logMessageType, logMessageData, threadInfo) {
     try {
         switch (logMessageType) {
             case "log:thread-name":
                 updateThreadDataInSettings(antiSettings, threadID, 'threadName', logMessageData.name);
                 //console.log(`[Anti] âœ“ Updated threadName for thread ${threadID}`);
                 break;
-            case "log:thread-color":
-                updateThreadDataInSettings(antiSettings, threadID, 'themeColor', logMessageData.theme_color);
-                updateThreadDataInSettings(antiSettings, threadID, 'themeId', logMessageData.theme_id);
-                updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', logMessageData.accessibility_label);
-                //console.log(`[Anti] âœ“ Updated theme data - ID: ${logMessageData.theme_id}, Color: ${logMessageData.theme_color}, Label: ${logMessageData.accessibility_label}`);
+            case "log:thread-color": {
+                const themeData = resolveThemeEventData(logMessageData, threadInfo);
+                updateThreadDataInSettings(antiSettings, threadID, 'themeColor', themeData.themeColor);
+                updateThreadDataInSettings(antiSettings, threadID, 'themeId', themeData.themeId);
+                updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', themeData.accessibilityLabel);
+                //console.log(`[Anti] âœ“ Updated theme data - ID: ${themeData.themeId}, Color: ${themeData.themeColor}, Label: ${themeData.accessibilityLabel}`);
                 break;
+            }
             case "log:thread-icon":
                 {
                     const emojiValue =
@@ -643,12 +693,16 @@ async function updateDataAfterEvent(api, antiSettings, threadID, logMessageType,
                 updateThreadDataInSettings(antiSettings, threadID, 'imageSrc', logMessageData.url);
                 //console.log(`[Anti] âœ“ Updated imageSrc for thread ${threadID}`);
                 break;
-            case "log:thread-admins":
-                const threadInfo = await api.getThreadInfo(threadID);
-                const currentAdmins = (threadInfo.adminIDs || []).map(a => String(a.id || a));
+            case "log:thread-admins": {
+                const latestThreadInfo = await getFreshThreadInfo(api, threadID, { delayMs: ADMIN_REFRESH_DELAY_MS });
+                const currentAdmins = normalizeAdminIDs(latestThreadInfo.adminIDs);
+                if (currentAdmins.length === 0) {
+                    break;
+                }
                 updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdmins);
                 //console.log(`[Anti] âœ“ Updated adminIDs for thread ${threadID}`);
                 break;
+            }
         }
         saveAntiSettings(antiSettings);
     } catch (error) {

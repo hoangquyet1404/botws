@@ -6,17 +6,17 @@
     "adminOnly": false,
     "BOTNAME": "Neo Bot",
     "api": {
-        "url": "https://api.subhatde.id.vn",
-        "key": "682166a8f47ccd60713e668e50916d9c",
-        "fca": "fca3"
+        "url": "https://api.khotools.com",
+        "key": "",
+        "fca": "fcaPrime"
     },
-    "token": "EAADo1TDZCuu8BQniB08TzbyitzA0z3yMSZAxpUbh7w7HflaJnn6ZCigZB0DNMQVntNRGNQb6XMaIIbtIfBto2seGcsyHZC1XUtiz4Qtnk2ysg3wUc6mkRjptL8h4tQKsPKh1yZAYbPbGZAzoM93J4OnBr0QUZCvM3FRvU98a0uzgh6IJ9tsOuIPA7Nz1ZCNVJBGZCEDHUSvQZDZD",
-    "status": true,
+    "token": "",
+    "autolog": true,
     "facebookAccount": {
         "email": "",
         "password": "",
         "twofactor": "",
-        "type": "apk"
+        "type": "ios"
     },
     "ADMINBOT": [
         "100009801367183"
@@ -25,9 +25,9 @@
         "100009801367183"
     ],
     "boxAdmin": [],
-    "reconnectMinutes": 60,
+    "reconnectMinutes": 6000,
     "autoReconnect": true,
     "listenEvents": true,
     "commandDisabled": [],
-    "cookie": "c_user=61586687122108; xs=2:KhML1MoS9MW94Q:2:1770617004:-1:-1; fr=0xa3G1U3yZuq5x4RE.AWcEugRgNQfYVgmaJM8MRTqa5nYc8SiSh4LSDjnTIl6xRGDmrf8.BpiXir..AAA.0.0.BpiXir.AWede_n6HtXfD7lD6g5F8xwNOeE; datr=q3iJaUYTRbYc83R_68n4dhiv"
+    "cookie": ""
 }

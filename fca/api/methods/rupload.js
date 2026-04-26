@@ -11,8 +11,8 @@ module.exports = (api) => async (source, options, callback) => {
 
     if (!source) throw new Error("rupload: source (url/stream) is required");
 
-    if (api.config && api.config.token) {
-        options.eaadToken = api.config.token;
+    if (api.config && !options.eaadToken && !options.accessToken) {
+        options.eaadToken = api.config.ACCESS_TOKEN_MESS || api.config.token;
     }
 
     try {

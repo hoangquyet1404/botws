@@ -1,17 +1,9 @@
 
 const moment = require("moment-timezone");
-const fs = require("fs");
-const path = require("path");
-const notiSettingsPath = path.join(process.cwd(), '/main/data/notiSettings.json');
-function loadNotiSettings() {
-    try {
-        if (!fs.existsSync(notiSettingsPath)) {
-            fs.writeFileSync(notiSettingsPath, JSON.stringify({ threads: {} }, null, 2));
-        }
-        return JSON.parse(fs.readFileSync(notiSettingsPath, 'utf8'));
-    } catch (error) {
-        return { threads: {} };
-    }
+function loadNotiSettings(database) {
+    const settings = database.get.json("notiSettings", "default", { threads: {} });
+    if (!settings.threads || typeof settings.threads !== "object") settings.threads = {};
+    return settings;
 }
 
 module.exports = {
@@ -28,6 +20,9 @@ module.exports = {
             "log:user-nickname",
             "log:thread-admins",
             "log:thread-approval-mode",
+            "log:thread-approval-request",
+            "log:thread-approval-approve",
+            "log:thread-approval-reject",
             "log:approval-queue",
             "log:approval-queue-action",
             "log:pin-message",
@@ -37,12 +32,12 @@ module.exports = {
         ]
     },
 
-    onEvent: async function({ api, event }) {
+    onEvent: async function({ api, event, database }) {
         try {
             const { threadID, logMessageType, logMessageData, logMessageBody, author } = event;
             const time = moment.tz("Asia/Ho_Chi_Minh").format("HH:mm:ss DD/MM/YYYY");
             if (author === api.getCurrentUserID()) return;
-            const notiSettings = loadNotiSettings();
+            const notiSettings = loadNotiSettings(database);
             const threadNoti = notiSettings.threads[threadID] || {};
             const threadInfo = await api.getThreadInfo(threadID);
             const authorUser = threadInfo.userInfo.find(u => u.id === author);
@@ -123,6 +118,39 @@ module.exports = {
                     if (threadNoti.notiApproval === false) return;
                     const enabled = logMessageData?.APPROVAL_MODE === 1;
                     message = `${userName} đã ${enabled ? 'bật' : 'tắt'} chế độ phê duyệt thành viên`;
+                    break;
+                }
+
+                case "log:thread-approval-request":
+                case "log:thread-approval-approve":
+                case "log:thread-approval-reject": {
+                    if (threadNoti.notiApproval === false) return;
+
+                    const requesterID = String(
+                        logMessageData?.requester_id ||
+                        logMessageData?.participant_id ||
+                        ""
+                    );
+                    const requester = requesterID
+                        ? threadInfo.userInfo.find(u => String(u.id) === requesterID)
+                        : null;
+                    const requesterName =
+                        logMessageData?.requester_name ||
+                        (requester ? requester.name : null) ||
+                        "Ai Ä‘Ã³";
+                    const actorID = String(logMessageData?.actor_id || author || "");
+                    const actor = actorID
+                        ? threadInfo.userInfo.find(u => String(u.id) === actorID)
+                        : null;
+                    const actorName = actor ? actor.name : userName;
+
+                    if (logMessageType === "log:thread-approval-request") {
+                        message = `${requesterName} Ä‘Ã£ gá»­i yÃªu cáº§u tham gia nhÃ³m`;
+                    } else if (logMessageType === "log:thread-approval-approve") {
+                        message = `${actorName} Ä‘Ã£ cháº¥p nháº­n yÃªu cáº§u tham gia cá»§a ${requesterName}`;
+                    } else {
+                        message = `${actorName} Ä‘Ã£ tá»« chá»‘i yÃªu cáº§u tham gia cá»§a ${requesterName}`;
+                    }
                     break;
                 }
 
