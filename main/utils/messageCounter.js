@@ -197,6 +197,10 @@ class MessageCounter {
         };
     }
 
+    createDefaultAutoTopNoti() {
+        return this.createDefaultNoti(0, 0, true);
+    }
+
     seedCurrentSlotIfPassed(type, noti, nowInput) {
         const now = nowInput || moment.tz(this.timezone);
         const slot = this.getNotiSlot(type, noti, now);
@@ -227,6 +231,28 @@ class MessageCounter {
             lastSent: source.lastSent || null,
             lastSentSlot: source.lastSentSlot || null,
             delivery: source.delivery && typeof source.delivery === 'object' ? source.delivery : null
+        };
+    }
+
+    ensureDefaultThreadNoti(settings, threadID, nowInput) {
+        const now = nowInput || moment.tz(this.timezone);
+        const bucket = this.getThreadNotiBucket(settings, threadID);
+        let changed = false;
+
+        for (const type of ['day', 'week', 'month']) {
+            if (bucket[type] && typeof bucket[type] === 'object') continue;
+            this.setThreadNotiValue(
+                settings,
+                threadID,
+                type,
+                this.seedCurrentSlotIfPassed(type, this.createDefaultAutoTopNoti(), now)
+            );
+            changed = true;
+        }
+
+        return {
+            changed,
+            bucket: this.getThreadNotiBucket(settings, threadID)
         };
     }
 
@@ -320,8 +346,12 @@ class MessageCounter {
     getNotiTime(threadID, type) {
         const settings = this.getNotiSettings();
         const raw = this.getThreadNotiValue(settings, threadID, type);
-        if (!raw || typeof raw !== 'object') return null;
-        return this.normalizeNoti(raw, this.createDefaultNoti());
+        if (!raw || typeof raw !== 'object') {
+            return this.getThreadRow(threadID)
+                ? this.normalizeNoti(null, this.createDefaultAutoTopNoti())
+                : null;
+        }
+        return this.normalizeNoti(raw, this.createDefaultAutoTopNoti());
     }
 
     disableNoti(threadID, type) {
@@ -360,11 +390,14 @@ class MessageCounter {
         const nowMs = now.valueOf();
         const settings = this.getNotiSettings();
         const toSend = [];
+        let settingsChanged = false;
 
         for (const threadID of this.getAllThreadIDs()) {
-            const threadSettings = this.getThreadNotiBucket(settings, threadID);
+            const ensured = this.ensureDefaultThreadNoti(settings, threadID, now);
+            if (ensured.changed) settingsChanged = true;
+            const threadSettings = ensured.bucket;
             if (!this.isTopNotiBucket(threadSettings)) continue;
-            const defaultTime = this.createDefaultNoti();
+            const defaultTime = this.createDefaultAutoTopNoti();
             for (const type of ['day', 'week', 'month']) {
                 if (!threadSettings[type] || typeof threadSettings[type] !== 'object') continue;
                 const noti = this.normalizeNoti(threadSettings[type], defaultTime);
@@ -381,13 +414,14 @@ class MessageCounter {
             }
         }
 
+        if (settingsChanged) this.saveNotiSettings(settings);
         return toSend;
     }
 
     markNotiAsSending(threadID, type, slotKey) {
         const now = moment.tz(this.timezone);
         const settings = this.getNotiSettings();
-        const noti = this.normalizeNoti(this.getThreadNotiValue(settings, threadID, type), this.createDefaultNoti());
+        const noti = this.normalizeNoti(this.getThreadNotiValue(settings, threadID, type), this.createDefaultAutoTopNoti());
         const slot = slotKey ? { slotKey } : this.getNotiSlot(type, noti, now);
         const nowMs = now.valueOf();
         if (slot && this.hasActiveNotiLock(noti, slot, nowMs)) return false;
@@ -413,7 +447,7 @@ class MessageCounter {
     markNotiAsSent(threadID, type, slotKey) {
         const now = moment.tz(this.timezone);
         const settings = this.getNotiSettings();
-        const noti = this.normalizeNoti(this.getThreadNotiValue(settings, threadID, type), this.createDefaultNoti());
+        const noti = this.normalizeNoti(this.getThreadNotiValue(settings, threadID, type), this.createDefaultAutoTopNoti());
         const slot = slotKey ? { slotKey, periodKey: this.getPeriodKeyFromSlotKey(type, slotKey, now) } : this.getNotiSlot(type, noti, now);
         const periodKey = slot?.periodKey || this.getPeriodKey(type, now);
         const nowMs = now.valueOf();
@@ -434,7 +468,7 @@ class MessageCounter {
     markNotiAsFailed(threadID, type, slotKey, error) {
         const nowMs = moment.tz(this.timezone).valueOf();
         const settings = this.getNotiSettings();
-        const noti = this.normalizeNoti(this.getThreadNotiValue(settings, threadID, type), this.createDefaultNoti());
+        const noti = this.normalizeNoti(this.getThreadNotiValue(settings, threadID, type), this.createDefaultAutoTopNoti());
         const attempts = Number(noti.delivery?.attempts || 1);
         const permanent = this.isPermanentNotiSendError(error);
         const finalFailure = permanent || attempts >= this.notiMaxFailedAttempts;

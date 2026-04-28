@@ -51,6 +51,83 @@ function isHistoryReplayEvent(message) {
     return Boolean(  message.isHistory ||message.isReplay ||  message.isPreloaded || message.preloaded || message.replay || message.__history || message.__replay || data.isHistory || data.isReplay || data.isPreloaded || data.preloaded || data.replay || data.__history || data.__replay);
 }
 
+function isGenericUserName(name) {
+    const text = String(name || '').trim().toLowerCase();
+    return !text || text === 'facebook user' || text === 'user' || text === 'unknown user' || text === 'người dùng facebook' || text === 'người dùng';
+}
+
+function collectFetchedUsers(value, output) {
+    if (!value) return;
+    if (Array.isArray(value)) {
+        value.forEach(item => collectFetchedUsers(item, output));
+        return;
+    }
+    if (typeof value !== 'object') return;
+
+    if (value.id && value.name) {
+        output.set(String(value.id), value);
+    }
+
+    for (const [key, item] of Object.entries(value)) {
+        if (item && typeof item === 'object') {
+            const user = { id: item.id || key, ...item };
+            if (user.id && user.name) output.set(String(user.id), user);
+        }
+    }
+}
+
+async function hydrateTopUserNames(api, threadInfo, userIDs) {
+    const nameMap = new Map();
+    const missing = [];
+    const users = Array.isArray(threadInfo?.userInfo) ? threadInfo.userInfo : [];
+
+    for (const rawID of userIDs) {
+        const id = String(rawID || '').trim();
+        if (!id) continue;
+        const user = users.find(item => String(item.id) === id);
+        if (user?.name && !isGenericUserName(user.name)) {
+            nameMap.set(id, user.name);
+        } else {
+            missing.push(id);
+        }
+    }
+
+    if (missing.length > 0 && typeof api.getUserInfo === 'function') {
+        try {
+            const fetched = await api.getUserInfo(Array.from(new Set(missing)));
+            const fetchedUsers = new Map();
+            collectFetchedUsers(fetched, fetchedUsers);
+            for (const id of missing) {
+                const user = fetchedUsers.get(id);
+                if (user?.name && !isGenericUserName(user.name)) {
+                    nameMap.set(id, user.name);
+                }
+            }
+        } catch (_) { }
+    }
+
+    return nameMap;
+}
+
+function filterStatsToParticipants(stats, threadInfo) {
+    const participantIDs = Array.isArray(threadInfo?.participantIDs)
+        ? threadInfo.participantIDs.map(String).filter(Boolean)
+        : [];
+    if (!stats || !Array.isArray(stats.list) || participantIDs.length === 0) return stats;
+
+    const participantSet = new Set(participantIDs);
+    const list = stats.list
+        .filter(item => participantSet.has(String(item.userID)))
+        .map((item, index) => ({ ...item, rank: index + 1 }));
+
+    return {
+        ...stats,
+        list,
+        total: list.reduce((sum, item) => sum + (Number(item.count) || 0), 0),
+        top1: list[0] || null
+    };
+}
+
 function extractIdFromJid(value) {
     const match = String(value || '').match(/^(\d+)/);
     return match ? match[1] : '';
@@ -131,18 +208,23 @@ module.exports = function ({ api }) {
             for (const { threadID, type, slotKey } of toSend) {
                 try {
                     if (messageCounter.markNotiAsSending && !messageCounter.markNotiAsSending(threadID, type, slotKey)) continue;
-                    const topStats = messageCounter.getTopStats(threadID, 10), stats = topStats[type];
-                    if (!stats || stats.list.length === 0) { messageCounter.markNotiAsSent(threadID, type, slotKey); continue; }
                     const threadInfo = await api.getThreadInfo(threadID);
+                    if (Array.isArray(threadInfo?.participantIDs) && threadInfo.participantIDs.length > 0) {
+                        try { messageCounter.initializeAllMembers(threadID, threadInfo.participantIDs); } catch (_) { }
+                    }
+                    const topStats = messageCounter.getTopStats(threadID, 10);
+                    const stats = filterStatsToParticipants(topStats[type], threadInfo);
+                    if (!stats || stats.list.length === 0) { messageCounter.markNotiAsSent(threadID, type, slotKey); continue; }
                     let message = `━━ Top tương tác ${type === 'day' ? 'ngày' : type === 'week' ? 'tuần' : 'tháng'} ━━\n`, total = stats.total;
+                    const displayNameMap = await hydrateTopUserNames(api, threadInfo, stats.list.map(item => item.userID));
                     for (let i = 0; i < stats.list.length; i++) {
-                        const item = stats.list[i], userInfo = threadInfo.userInfo.find(u => u.id === item.userID), userName = userInfo?.name || 'Facebook User';
+                        const item = stats.list[i], userInfo = (threadInfo.userInfo || []).find(u => String(u.id) === String(item.userID)), userName = displayNameMap.get(String(item.userID)) || userInfo?.name || `User ${item.userID}`;
                         const percent = total > 0 ? ((item.count / total) * 100).toFixed(1) : 0, symbol = i === 0 ? '★' : i === 1 ? '✦' : i === 2 ? '✧' : '•';
                         message += `${symbol} ${item.rank}. ${userName}: ${item.count}(${percent}%)\n`;
                     }
                     message += `━━━━━━━━━━━━━━━━━━━━\n➤ Tổng: ${stats.total} tin\n`;
                     if (stats.top1) {
-                        const top1Info = threadInfo.userInfo.find(u => u.id === stats.top1.userID), top1Name = top1Info?.name || 'Facebook User';
+                        const top1Info = (threadInfo.userInfo || []).find(u => String(u.id) === String(stats.top1.userID)), top1Name = displayNameMap.get(String(stats.top1.userID)) || top1Info?.name || `User ${stats.top1.userID}`;
                         message += `★ Top1: ${top1Name} (${stats.top1.count})\n`;
                     }
                     await api.sendMessage(message, threadID);
