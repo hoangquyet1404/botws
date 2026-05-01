@@ -404,6 +404,11 @@ class MessageCounter {
                 if (!noti.enabled) continue;
                 const slot = this.getNotiSlot(type, noti, now);
                 if (!slot || this.hasNotiSlotBeenSent(noti, slot) || this.hasActiveNotiLock(noti, slot, nowMs)) continue;
+                if (!store.checktt.claimNotiSlot(threadID, type, slot.slotKey, {
+                    now: nowMs,
+                    lockMs: this.notiSendingLockMs,
+                    maxAttempts: this.notiMaxFailedAttempts
+                })) continue;
                 toSend.push({
                     threadID,
                     type,
@@ -463,6 +468,9 @@ class MessageCounter {
             }
         });
         this.saveNotiSettings(settings);
+        if (slot?.slotKey) {
+            store.checktt.setNotiSlotStatus(threadID, type, slot.slotKey, 'sent', { now: nowMs });
+        }
     }
 
     markNotiAsFailed(threadID, type, slotKey, error) {
@@ -487,6 +495,19 @@ class MessageCounter {
             }
         });
         this.saveNotiSettings(settings);
+        if (slotKey || noti.delivery?.slotKey) {
+            store.checktt.setNotiSlotStatus(
+                threadID,
+                type,
+                slotKey || noti.delivery?.slotKey,
+                finalFailure ? 'failed_final' : 'failed',
+                {
+                    now: nowMs,
+                    nextRetryAt: finalFailure ? null : nowMs + this.notiFailedRetryMs,
+                    error: error?.message || String(error || '')
+                }
+            );
+        }
     }
 
     initializeAllMembers(threadID, participantIDs) {

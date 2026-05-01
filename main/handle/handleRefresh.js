@@ -7,7 +7,7 @@ const ADMIN_REFRESH_DELAY_MS = 800;
 function sendAntiMessage(api, message, threadID) {
     api.sendMessage(message, threadID, (err, messageInfo) => {
         if (err) {
-            console.error("[Anti] Lá»—i gá»­i tin nháº¯n:", err);
+            console.error("[Anti] Lỗi gửi tin nhắn:", err);
             return;
         }
 
@@ -102,6 +102,8 @@ function resolveThemeEventData(logMessageData, threadInfo) {
             logMessageData?.accessibility_label ||
             logMessageData?.theme_name_with_subtitle ||
             logMessageData?.theme_name ||
+            threadInfo?.accessibility_label ||
+            threadInfo?.accessibilityLabel ||
             null,
         themeColor:
             logMessageData?.theme_color ??
@@ -110,12 +112,46 @@ function resolveThemeEventData(logMessageData, threadInfo) {
             null,
         themeId:
             logMessageData?.theme_id ??
+            logMessageData?.themeID ??
             threadInfo?.threadThemeId ??
             threadInfo?.threadTheme ??
             threadInfo?.themeID ??
+            threadInfo?.theme_id ??
             threadInfo?.themeId ??
             null
     };
+}
+
+function getSavedThemeValue(savedData = {}) {
+    return (
+        savedData.themeId ||
+        savedData.threadTheme ||
+        savedData.themeID ||
+        savedData.themeColor ||
+        savedData.color ||
+        null
+    );
+}
+
+async function restoreThreadTheme(api, threadID, themeValue) {
+    if (!themeValue) return false;
+
+    try {
+        await api.changeThreadColor(themeValue, threadID);
+        return true;
+    } catch (colorErr) {
+        console.error("[Anti Color] Lỗi khôi phục bằng changeThreadColor:", colorErr);
+    }
+
+    if (typeof api.theme !== "function") return false;
+
+    try {
+        await api.theme(themeValue, threadID);
+        return true;
+    } catch (themeErr) {
+        console.error("[Anti Color] Lỗi khôi phục bằng theme:", themeErr);
+        return false;
+    }
 }
 
 function buildThreadSnapshot(threadInfo = {}) {
@@ -201,9 +237,9 @@ module.exports = function ({ api }) {
 
                         try {
                             await api.removeFromGroup(userID, threadID);
-                            console.log(`[Anti Join] ÄÃ£ kick ${userID} khá»i nhÃ³m ${threadID}`);
+                            //console.log(`[Anti Join] ÄÃ£ kick ${userID} khá»i nhÃ³m ${threadID}`);
                         } catch (kickErr) {
-                            console.error(`[Anti Join] Lá»—i kick ${userID}:`, kickErr);
+                            console.error(`[Anti Join] Lỗi kick ${userID}:`, kickErr);
                         }
                     }
 
@@ -213,13 +249,9 @@ module.exports = function ({ api }) {
 
                         sendAntiMessage(
                             api,
-                            `⚠️ ANTI JOIN - CHẶN THÊM THÀNH VIÊN\n\n` +
+                            `⚠️ Bạn không có quyền thêm thành viên.\n` +
                             `Người thêm: ${adderName}\n` +
-                            `ID: ${author}\n` +
-                            `Số người bị kick: ${addedParticipants.filter(p => p.userFbId !== botID).length}\n` +
-                            `Thời gian: ${time}\n\n` +
-                            `Đã kick tất cả!\n` +
-                            `Chỉ QTV/Admin mới được thêm thành viên!`,
+                            `Đã kick: ${addedParticipants.filter(p => p.userFbId !== botID).length} người`,
                             threadID
                         );
                     }
@@ -248,27 +280,22 @@ module.exports = function ({ api }) {
 
                         sendAntiMessage(
                             api,
-                            `⚠️ ANTI LEAVE - CHẶN TỰ RỜI NHÓM\n\n` +
-                            `Người tự rời: ${leftUserName}\n` +
-                            `ID: ${leftUserID}\n` +
-                            `Thời gian: ${time}\n\n` +
-                            `Đã thêm lại vào nhóm!\n` +
-                            `Không được phép tự ý rời nhóm!`,
+                            `⚠️ Bạn không thể tự rời nhóm.\n` +
+                            `Thành viên: ${leftUserName}\n` +
+                            `Đã thêm lại vào nhóm.`,
                             threadID
                         );
                     } catch (addErr) {
-                        console.error(`[Anti Leave] Lá»—i thÃªm láº¡i ${leftUserID}:`, addErr);
+                        console.error(`[Anti Leave] Lỗi thêm lại ${leftUserID}:`, addErr);
 
                         const leftUser = threadInfo.userInfo.find(u => u.id === leftUserID);
-                        const leftUserName = leftUser ? leftUser.name : "ThÃ nh viÃªn";
+                        const leftUserName = leftUser ? leftUser.name : "Thành viên";
 
                         sendAntiMessage(
                             api,
-                            `⚠️ ANTI LEAVE - CHẶN TỰ RỜI NHÓM\n\n` +
-                            `Người tự rời: ${leftUserName}\n` +
-                            `ID: ${leftUserID}\n` +
-                            `Thời gian: ${time}\n\n` +
-                            `Không thể thêm lại (có thể đã chặn bot)`,
+                            `⚠️ Bạn không thể tự rời nhóm.\n` +
+                            `Thành viên: ${leftUserName}\n` +
+                            `Không thể thêm lại.`,
                             threadID
                         );
                     }
@@ -294,16 +321,12 @@ module.exports = function ({ api }) {
                         await api.gcname(oldName, threadID);
                         if (author !== api.getCurrentUserID()) {
                             const user = threadInfo.userInfo.find(u => u.id === author);
-                            const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+                            const userName = user ? user.name : "Người dùng";
                             sendAntiMessage(
                                 api,
-                                `⚠️ ANTI NAME - CHẶN ĐỔI TÊN NHÓM\n\n` +
+                                `⚠️ Bạn không có quyền đổi tên nhóm.\n` +
                                 `Người đổi: ${userName}\n` +
-                                `ID: ${author}\n` +
-                                `Tên mới: "${newName}"\n` +
-                                `Thời gian: ${time}\n\n` +
-                                `Đã khôi phục về: "${oldName}"\n` +
-                                `Chỉ QTV/Admin mới được đổi tên!`,
+                                `Đã khôi phục: "${oldName}"`,
                                 threadID
                             );
                         }
@@ -313,48 +336,50 @@ module.exports = function ({ api }) {
 
                 case "log:thread-color": {
                     const themeData = resolveThemeEventData(logMessageData, threadInfo);
-                    if (!threadSettings.enabled || !threadSettings.antiColor) {
+                    const saveThemeData = () => {
                         updateThreadDataInSettings(antiSettings, threadID, 'themeColor', themeData.themeColor);
                         updateThreadDataInSettings(antiSettings, threadID, 'themeId', themeData.themeId);
                         updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', themeData.accessibilityLabel);
                         saveAntiSettings(antiSettings);
+                    };
+
+                    if (!threadSettings.enabled || !threadSettings.antiColor) {
+                        saveThemeData();
                         //console.log(`[Anti] âœ“ Updated theme data (Anti OFF) - ID: ${themeData.themeId}, Color: ${themeData.themeColor}`);
                         break;
                     }
-                    const oldThemeId = savedData.themeId || savedData.threadTheme || savedData.themeID || savedData.color || savedData.themeColor;
-                    const newThemeId = themeData.themeId || themeData.themeColor;
-                    if (oldThemeId && (!newThemeId || newThemeId !== oldThemeId)) {
-                        if (isTrustedActor) {
-                            updateThreadDataInSettings(antiSettings, threadID, 'themeColor', themeData.themeColor);
-                            updateThreadDataInSettings(antiSettings, threadID, 'themeId', themeData.themeId);
-                            updateThreadDataInSettings(antiSettings, threadID, 'accessibility_label', themeData.accessibilityLabel);
-                            saveAntiSettings(antiSettings);
-                            break;
-                        }
-                        await api.changeThreadColor(oldThemeId, threadID);
 
-                        if (author !== api.getCurrentUserID()) {
-                            const user = threadInfo.userInfo.find(u => u.id === author);
-                            const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
-                            const oldThemeName = savedData.accessibility_label || "theme cÅ©";
-                            const newThemeName = themeData.accessibilityLabel || "theme má»›i";
-
-                            sendAntiMessage(
-                                api,
-                                `⚠️ ANTI COLOR - CHẶN ĐỔI THEME\n\n` +
-                                `Người đổi: ${userName}\n` +
-                                `ID: ${author}\n` +
-                                `Theme mới: ${newThemeName}\n` +
-                                `Thời gian: ${time}\n\n` +
-                                `Đã khôi phục về theme: ${oldThemeName}\n` +
-                                `Chỉ QTV/Admin mới được đổi màu!`,
-                                threadID
-                            );
-
-                        }
-                    } else {
-                        console.log(`[Anti Color]   No changes detected or no old theme saved`);
+                    if (isTrustedActor) {
+                        saveThemeData();
+                        break;
                     }
+
+                    if (author === api.getCurrentUserID()) break;
+
+                    const oldThemeId = getSavedThemeValue(savedData);
+                    if (!oldThemeId) {
+                        saveThemeData();
+                        sendAntiMessage(
+                            api,
+                            `⚠️ Chưa có theme gốc.\n` +
+                            `Đã lưu theme hiện tại để chống đổi lần sau.`,
+                            threadID
+                        );
+                        break;
+                    }
+
+                    const restoredTheme = await restoreThreadTheme(api, threadID, oldThemeId);
+                    const user = threadInfo.userInfo.find(u => u.id === author);
+                    const userName = user ? user.name : "Người dùng";
+                    const oldThemeName = savedData.accessibility_label || "theme cũ";
+
+                    sendAntiMessage(
+                        api,
+                        `⚠️ Bạn không có quyền đổi theme nhóm.\n` +
+                        `Người đổi: ${userName}\n` +
+                        (restoredTheme ? `Đã khôi phục: ${oldThemeName}` : `Không thể khôi phục theme.`),
+                        threadID
+                    );
                     break;
                 }
 
@@ -408,16 +433,12 @@ module.exports = function ({ api }) {
 
                         if (author !== api.getCurrentUserID()) {
                             const user = threadInfo.userInfo.find(u => u.id === author);
-                            const userName = user ? user.name : "Unknown user";
+                            const userName = user ? user.name : "Người dùng";
                             sendAntiMessage(
                                 api,
-                                "[Anti Emoji] Blocked emoji change\n\n" +
-                                "User: " + userName + "\n" +
-                                "ID: " + author + "\n" +
-                                "Attempted: " + latestEmoji + "\n" +
-                                "Time: " + time + "\n\n" +
-                                "Restored to: " + revertEmoji + "\n" +
-                                "Only admins can change the emoji.",
+                                "⚠️ Bạn không có quyền đổi emoji nhóm.\n" +
+                                "Người đổi: " + userName + "\n" +
+                                "Đã khôi phục: " + revertEmoji,
                                 threadID
                             );
                         }
@@ -450,19 +471,16 @@ module.exports = function ({ api }) {
                             await api.setNickname(oldNickname || "", threadID, participant_id);
 
                             const authorUser = threadInfo.userInfo.find(u => u.id === author);
-                            const userName = authorUser ? authorUser.name : "NgÆ°á» i dÃ¹ng";
+                            const userName = authorUser ? authorUser.name : "Người dùng";
                             const targetUser = threadInfo.userInfo.find(u => u.id === participant_id);
-                            const targetUserName = targetUser ? targetUser.name : "NgÆ°á» i dÃ¹ng";
+                            const targetUserName = targetUser ? targetUser.name : "Người dùng";
 
                             sendAntiMessage(
                                 api,
-                                `⚠️ ANTI NICKNAME - CHẶN ĐỔI BIỆT DANH\n\n` +
+                                `⚠️ Bạn không có quyền đổi biệt danh.\n` +
                                 `Người đổi: ${userName}\n` +
-                                `ID: ${author}\n` +
                                 `Đối tượng: ${targetUserName}\n` +
-                                `Thời gian: ${time}\n\n` +
-                                `Đã khôi phục biệt danh cũ!\n` +
-                                `Chỉ QTV/Admin mới được đổi biệt danh!`,
+                                `Đã khôi phục biệt danh cũ.`,
                                 threadID
                             );
                         } catch (err) {
@@ -489,28 +507,24 @@ module.exports = function ({ api }) {
                     if (oldImageSrc && author !== api.getCurrentUserID()) {
                         try {
                             const user = threadInfo.userInfo.find(u => u.id === author);
-                            const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+                            const userName = user ? user.name : "Người dùng";
                             const axios = require('axios');
                             const imageResponse = await axios.get(oldImageSrc, { responseType: 'stream' });
                             await api.changeGroupImage(oldImageSrc, threadID);
 
                             sendAntiMessage(
                                 api,
-                                `⚠️ ANTI IMAGE - CHẶN ĐỔI ẢNH NHÓM\n\n` +
+                                `⚠️ Bạn không có quyền đổi ảnh nhóm.\n` +
                                 `Người đổi: ${userName}\n` +
-                                `ID: ${author}\n` +
-                                `Thời gian: ${time}\n\n` +
-                                `Đã khôi phục ảnh cũ!\n` +
-                                `Chỉ QTV/Admin mới được đổi ảnh nhóm!`,
+                                `Đã khôi phục ảnh cũ.`,
                                 threadID
                             );
                         } catch (error) {
                             console.error("Error restoring group image:", error);
                             sendAntiMessage(
                                 api,
-                                `⚠️ ANTI IMAGE - CHẶN ĐỔI ẢNH NHÓM\n\n` +
-                                `Không thể khôi phục ảnh nhóm tự động.\n` +
-                                `Vui lòng admin đổi lại!`,
+                                `⚠️ Không thể khôi phục ảnh nhóm.\n` +
+                                `Vui lòng Admin đổi lại.`,
                                 threadID
                             );
                         }
@@ -525,7 +539,7 @@ module.exports = function ({ api }) {
                         saveAntiSettings(antiSettings);
                         break;
                     }
-                    if (isTrustedActor) {
+                    if (isAdminBot) {
                         const currentAdmins = normalizeAdminIDs(threadInfo.adminIDs);
                         updateThreadDataInSettings(antiSettings, threadID, 'adminIDs', currentAdmins);
                         saveAntiSettings(antiSettings);
@@ -553,28 +567,34 @@ module.exports = function ({ api }) {
                             const violatorID = String(author);
                             const isViolatorAdmin = oldAdminIDs.includes(violatorID);
                             const isViolatorBotAdmin = ADMINBOT.includes(violatorID) || NDH.includes(violatorID);
+                            const botID = api.getCurrentUserID();
+
+                            for (const adminID of removedAdmins) {
+                                if (adminID === botID) continue;
+                                try {
+                                    await api.changeAdminStatus(threadID, adminID, true);
+                                } catch (restoreErr) {
+                                    console.error(`[Anti Admin] Lỗi thêm lại QTV ${adminID}:`, restoreErr);
+                                }
+                            }
+
+                            for (const adminID of addedAdmins) {
+                                if (adminID === botID || ADMINBOT.includes(adminID) || NDH.includes(adminID)) continue;
+                                try {
+                                    await api.changeAdminStatus(threadID, adminID, false);
+                                } catch (removeAddedErr) {
+                                    console.error(`[Anti Admin] Lỗi gỡ QTV mới ${adminID}:`, removeAddedErr);
+                                }
+                            }
 
                             let violatorWasDemoted = false;
-                            if (isViolatorAdmin && !isViolatorBotAdmin && violatorID !== api.getCurrentUserID()) {
+                            if (isViolatorAdmin && !isViolatorBotAdmin && violatorID !== botID) {
                                 try {
                                     await api.changeAdminStatus(threadID, violatorID, false);
                                     violatorWasDemoted = true;
                                 } catch (demoteErr) {
-                                    console.error(`[Anti Admin] Lá»—i gá»¡ QTV ngÆ°á»i vi pháº¡m:`, demoteErr);
+                                    console.error(`[Anti Admin] Lỗi gỡ QTV người vi phạm:`, demoteErr);
                                 }
-                            }
-                            for (const adminID of addedAdmins) {
-                                if (violatorWasDemoted && adminID === violatorID) {
-                                    continue;
-                                }
-                                await api.changeAdminStatus(threadID, adminID, false);
-                            }
-
-                            for (const adminID of removedAdmins) {
-                                if (violatorWasDemoted && adminID === violatorID) {
-                                    continue;
-                                }
-                                await api.changeAdminStatus(threadID, adminID, true);
                             }
 
                             let finalAdminIDs = [...oldAdminIDs];
@@ -587,31 +607,28 @@ module.exports = function ({ api }) {
 
                             if (author !== api.getCurrentUserID()) {
                                 const user = threadInfo.userInfo.find(u => u.id === author);
-                                const userName = user ? user.name : "NgÆ°á»i dÃ¹ng";
+                                const userName = user ? user.name : "Người dùng";
 
                                 let changeDesc = "";
                                 if (addedAdmins.length > 0) {
-                                    changeDesc += `thÃªm ${addedAdmins.length} QTV`;
+                                    changeDesc += `thêm ${addedAdmins.length} QTV`;
                                 }
                                 if (removedAdmins.length > 0) {
-                                    if (changeDesc) changeDesc += " vÃ  ";
-                                    changeDesc += `xÃ³a ${removedAdmins.length} QTV`;
+                                    if (changeDesc) changeDesc += " và ";
+                                    changeDesc += `xóa ${removedAdmins.length} QTV`;
                                 }
 
                                 let punishmentMsg = "";
                                 if (violatorWasDemoted) {
-                                    punishmentMsg = `\nâš ï¸ ÄÃ£ gá»¡ quyá»n QTV cá»§a ${userName} do vi pháº¡m!`;
+                                    punishmentMsg = `\nĐã gỡ quyền QTV của ${userName} do vi phạm.`;
                                 }
 
                                 sendAntiMessage(
                                     api,
-                                    `⚠️ ANTI ADMIN - CHẶN THAY ĐỔI QTV\n\n` +
-                                    `Người vi phạm: ${userName}\n` +
-                                    `ID: ${author}\n` +
+                                    `⚠️ Bạn không có quyền đổi QTV.\n` +
+                                    `Người đổi: ${userName}\n` +
                                     `Hành động: ${changeDesc}\n` +
-                                    `Thời gian: ${time}\n\n` +
-                                    `Đã khôi phục danh sách QTV!${punishmentMsg}\n` +
-                                    `Chỉ Admin Bot mới được thay đổi QTV!`,
+                                    `Đã khôi phục danh sách QTV.${punishmentMsg}`,
                                     threadID
                                 );
                             }
@@ -619,9 +636,8 @@ module.exports = function ({ api }) {
                             console.error("Error restoring admin status:", error);
                             sendAntiMessage(
                                 api,
-                                `⚠️ ANTI ADMIN\n\n` +
-                                `Không thể khôi phục danh sách QTV.\n` +
-                                `Vui lòng tắt anti để thay đổi!`,
+                                `⚠️ Không thể khôi phục danh sách QTV.\n` +
+                                `Vui lòng tắt anti nếu cần thay đổi.`,
                                 threadID
                             );
                         }

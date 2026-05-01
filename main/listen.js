@@ -78,8 +78,9 @@ function collectFetchedUsers(value, output) {
 
 async function hydrateTopUserNames(api, threadInfo, userIDs) {
     const nameMap = new Map();
-    const missing = [];
     const users = Array.isArray(threadInfo?.userInfo) ? threadInfo.userInfo : [];
+    const threadUsers = new Map();
+    collectFetchedUsers(threadInfo, threadUsers);
 
     for (const rawID of userIDs) {
         const id = String(rawID || '').trim();
@@ -87,26 +88,84 @@ async function hydrateTopUserNames(api, threadInfo, userIDs) {
         const user = users.find(item => String(item.id) === id);
         if (user?.name && !isGenericUserName(user.name)) {
             nameMap.set(id, user.name);
-        } else {
-            missing.push(id);
+        } else if (threadUsers.get(id)?.name && !isGenericUserName(threadUsers.get(id).name)) {
+            nameMap.set(id, threadUsers.get(id).name);
         }
     }
 
-    if (missing.length > 0 && typeof api.getUserInfo === 'function') {
-        try {
-            const fetched = await api.getUserInfo(Array.from(new Set(missing)));
-            const fetchedUsers = new Map();
-            collectFetchedUsers(fetched, fetchedUsers);
-            for (const id of missing) {
-                const user = fetchedUsers.get(id);
-                if (user?.name && !isGenericUserName(user.name)) {
-                    nameMap.set(id, user.name);
-                }
-            }
-        } catch (_) { }
+    const nicknames = threadInfo?.nicknames || threadInfo?.nickNames || {};
+    for (const rawID of userIDs) {
+        const id = String(rawID || '').trim();
+        if (!id || nameMap.has(id)) continue;
+        const nickname = nicknames[id];
+        if (nickname && String(nickname).trim()) nameMap.set(id, String(nickname).trim());
     }
 
     return nameMap;
+}
+
+function loadThreadNameCache(threadID) {
+    return store.getJson('threadUserNames', String(threadID), {});
+}
+
+function saveThreadNameCache(threadID, threadInfo) {
+    const cache = loadThreadNameCache(threadID);
+    let changed = false;
+
+    const users = new Map();
+    collectFetchedUsers(threadInfo, users);
+    for (const [id, user] of users) {
+        if (!user?.name || isGenericUserName(user.name)) continue;
+        if (cache[id] !== user.name) {
+            cache[id] = user.name;
+            changed = true;
+        }
+    }
+
+    const nicknames = threadInfo?.nicknames || threadInfo?.nickNames || {};
+    for (const [id, nickname] of Object.entries(nicknames)) {
+        const name = String(nickname || '').trim();
+        if (!name || cache[id]) continue;
+        cache[id] = name;
+        changed = true;
+    }
+
+    if (changed) store.setJson('threadUserNames', String(threadID), cache);
+    return cache;
+}
+
+function isGroupThreadInfo(threadInfo) {
+    if (!threadInfo || typeof threadInfo !== 'object') return false;
+    if (threadInfo.isGroup === true) return true;
+    if (threadInfo.isGroup === false) return false;
+
+    const participantIDs = normalizeIDList(threadInfo.participantIDs);
+    return participantIDs.length > 2;
+}
+
+function getDisplayName(displayNameMap, threadInfo, userID, cachedNames = {}) {
+    const id = String(userID || '');
+    if (!id) return 'Facebook User';
+
+    const fromMap = displayNameMap.get(id);
+    if (fromMap && !isGenericUserName(fromMap)) return fromMap;
+
+    const users = Array.isArray(threadInfo?.userInfo) ? threadInfo.userInfo : [];
+    const user = users.find(item => String(item.id) === id);
+    if (user?.name && !isGenericUserName(user.name)) return user.name;
+
+    const nicknames = threadInfo?.nicknames || threadInfo?.nickNames || {};
+    const nickname = nicknames[id];
+    if (nickname && String(nickname).trim()) return String(nickname).trim();
+
+    const cachedName = cachedNames[id];
+    if (cachedName && !isGenericUserName(cachedName)) return cachedName;
+
+    return 'Facebook User';
+}
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function filterStatsToParticipants(stats, threadInfo) {
@@ -118,6 +177,57 @@ function filterStatsToParticipants(stats, threadInfo) {
     const participantSet = new Set(participantIDs);
     const list = stats.list
         .filter(item => participantSet.has(String(item.userID)))
+        .map((item, index) => ({ ...item, rank: index + 1 }));
+
+    return {
+        ...stats,
+        list,
+        total: list.reduce((sum, item) => sum + (Number(item.count) || 0), 0),
+        top1: list[0] || null
+    };
+}
+
+function normalizeIDList(values) {
+    return Array.from(new Set(
+        (Array.isArray(values) ? values : [])
+            .map(value => String(value || '').trim())
+            .filter(Boolean)
+    ));
+}
+
+function getStoredUserIDs(threadData) {
+    return normalizeIDList(Object.keys((threadData && threadData.users) || {}));
+}
+
+function shouldTrustParticipantList(threadInfo, threadData) {
+    const participantIDs = normalizeIDList(threadInfo && threadInfo.participantIDs);
+    const storedUserIDs = getStoredUserIDs(threadData);
+
+    if (participantIDs.length === 0) return false;
+    if (!threadInfo || !threadInfo.isGroup || storedUserIDs.length === 0) return true;
+
+    return participantIDs.length + 5 >= storedUserIDs.length;
+}
+
+function getEffectiveParticipantIDs(threadInfo, threadData) {
+    const participantIDs = normalizeIDList(threadInfo && threadInfo.participantIDs);
+    const storedUserIDs = getStoredUserIDs(threadData);
+
+    if (shouldTrustParticipantList(threadInfo, threadData)) {
+        return participantIDs.length > 0 ? participantIDs : storedUserIDs;
+    }
+
+    return Array.from(new Set(storedUserIDs.concat(participantIDs)));
+}
+
+function filterStatsToUserIDs(stats, userIDs, limit = 10) {
+    if (!stats || !Array.isArray(stats.list)) return stats;
+    if (!Array.isArray(userIDs) || userIDs.length === 0) return stats;
+
+    const userIDSet = new Set(userIDs.map(String));
+    const list = stats.list
+        .filter(item => userIDSet.has(String(item.userID)))
+        .slice(0, limit)
         .map((item, index) => ({ ...item, rank: index + 1 }));
 
     return {
@@ -202,38 +312,49 @@ module.exports = function ({ api }) {
         }
     }
 
-    setInterval(async () => {
+    if (global.__topttInterval) clearInterval(global.__topttInterval);
+    global.__topttInterval = setInterval(async () => {
         try {
             const toSend = messageCounter.checkScheduledNoti();
             for (const { threadID, type, slotKey } of toSend) {
                 try {
                     if (messageCounter.markNotiAsSending && !messageCounter.markNotiAsSending(threadID, type, slotKey)) continue;
-                    const threadInfo = await api.getThreadInfo(threadID);
-                    if (Array.isArray(threadInfo?.participantIDs) && threadInfo.participantIDs.length > 0) {
-                        try { messageCounter.initializeAllMembers(threadID, threadInfo.participantIDs); } catch (_) { }
+                    const threadInfo = await api.getThreadInfo({ threadID, forceRefresh: true }).catch(() => api.getThreadInfo(threadID));
+                    if (!isGroupThreadInfo(threadInfo)) {
+                        messageCounter.markNotiAsSent(threadID, type, slotKey);
+                        await delay(1000);
+                        continue;
                     }
-                    const topStats = messageCounter.getTopStats(threadID, 10);
-                    const stats = filterStatsToParticipants(topStats[type], threadInfo);
-                    if (!stats || stats.list.length === 0) { messageCounter.markNotiAsSent(threadID, type, slotKey); continue; }
+                    const cachedNames = saveThreadNameCache(threadID, threadInfo);
+                    const threadData = messageCounter.getThreadData(threadID);
+                    const participantIDs = getEffectiveParticipantIDs(threadInfo, threadData);
+                    if (participantIDs.length > 0) {
+                        try { messageCounter.initializeAllMembers(threadID, participantIDs); } catch (_) { }
+                    }
+                    const topStats = messageCounter.getTopStats(threadID, 999);
+                    const stats = filterStatsToUserIDs(topStats[type], participantIDs, 10);
+                    if (!stats || stats.list.length === 0 || Number(stats.total || 0) <= 0) { messageCounter.markNotiAsSent(threadID, type, slotKey); await delay(1000); continue; }
                     let message = `━━ Top tương tác ${type === 'day' ? 'ngày' : type === 'week' ? 'tuần' : 'tháng'} ━━\n`, total = stats.total;
                     const displayNameMap = await hydrateTopUserNames(api, threadInfo, stats.list.map(item => item.userID));
                     for (let i = 0; i < stats.list.length; i++) {
-                        const item = stats.list[i], userInfo = (threadInfo.userInfo || []).find(u => String(u.id) === String(item.userID)), userName = displayNameMap.get(String(item.userID)) || userInfo?.name || `User ${item.userID}`;
+                        const item = stats.list[i], userName = getDisplayName(displayNameMap, threadInfo, item.userID, cachedNames);
                         const percent = total > 0 ? ((item.count / total) * 100).toFixed(1) : 0, symbol = i === 0 ? '★' : i === 1 ? '✦' : i === 2 ? '✧' : '•';
                         message += `${symbol} ${item.rank}. ${userName}: ${item.count}(${percent}%)\n`;
                     }
                     message += `━━━━━━━━━━━━━━━━━━━━\n➤ Tổng: ${stats.total} tin\n`;
                     if (stats.top1) {
-                        const top1Info = (threadInfo.userInfo || []).find(u => String(u.id) === String(stats.top1.userID)), top1Name = displayNameMap.get(String(stats.top1.userID)) || top1Info?.name || `User ${stats.top1.userID}`;
+                        const top1Name = getDisplayName(displayNameMap, threadInfo, stats.top1.userID, cachedNames);
                         message += `★ Top1: ${top1Name} (${stats.top1.count})\n`;
                     }
                     await api.sendMessage(message, threadID);
                     messageCounter.resetCounter(threadID, type); messageCounter.markNotiAsSent(threadID, type, slotKey);
+                    await delay(1000);
                 } catch (error) {
                     if (messageCounter.markNotiAsFailed) messageCounter.markNotiAsFailed(threadID, type, slotKey, error);
                     const errorCode = error && error.code ? ` (${error.code})` : '';
                     const errorMessage = error && error.message ? error.message : String(error || '');
                     console.error(`[TopTT] Send failed for ${threadID}/${type}: ${errorMessage}${errorCode}`);
+                    await delay(1000);
                 }
             }
         } catch (e) { console.error("Error in stats interval:", e); }

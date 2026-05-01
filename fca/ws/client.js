@@ -143,6 +143,22 @@ function normalizeReconnectIntervalMs(config = {}) {
     return Math.min(intervalMs, MAX_TIMER_MS);
 }
 
+function normalizeSessionInitTimeoutMs(config = {}) {
+    const explicitMs = Number(
+        config.privateWsSessionInitTimeoutMs
+        || config.sessionInitTimeoutMs
+        || config.sessionInitTimeout
+        || config.privateWsInitTimeoutMs
+        || 0
+    );
+
+    if (Number.isFinite(explicitMs) && explicitMs > 0) {
+        return Math.min(explicitMs, MAX_TIMER_MS);
+    }
+
+    return 120000;
+}
+
 function formatDurationMs(ms) {
     if (ms % 60000 === 0) return `${ms / 60000}m`;
     if (ms % 1000 === 0) return `${ms / 1000}s`;
@@ -334,10 +350,11 @@ class PrivateWsClient {
         return new Promise((resolve, reject) => {
             this.sessionInitStartedAt = Date.now();
             this.sessionReadyAt = 0;
+            const timeoutMs = normalizeSessionInitTimeoutMs(this.config);
             const timeout = setTimeout(() => {
                 delete this.timers.sessionInitReject;
                 reject(new Error('Remote session init timeout'));
-            }, 30000);
+            }, timeoutMs);
 
             this.timers.sessionInitReject = { resolve, reject, timeout };
             this.ws.send(JSON.stringify({ type: 'session.init', payload: sessionPayload }));

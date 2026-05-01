@@ -235,7 +235,7 @@ module.exports = {
         role: 0,
         author: "Admin",
         info: "Tao chu bang anh NASA Landsat",
-        Category: "Tool",
+        Category: "Box",
         guides: "<chu A-Z>",
         cd: 2,
         hasPrefix: true,

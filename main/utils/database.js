@@ -109,6 +109,8 @@ class BotDatabase {
             getTopList: this.getCheckttTopList.bind(this),
             getTotal: this.getCheckttTotal.bind(this),
             resetCounter: this.resetCheckttCounter.bind(this),
+            claimNotiSlot: this.claimCheckttNotiSlot.bind(this),
+            setNotiSlotStatus: this.setCheckttNotiSlotStatus.bind(this),
             getThreadIDs: this.getCheckttThreadIDs.bind(this),
             initializeMembers: this.initializeCheckttMembers.bind(this),
             syncParticipants: this.syncCheckttParticipants.bind(this),
@@ -168,6 +170,21 @@ class BotDatabase {
             CREATE INDEX IF NOT EXISTS idx_checktt_week ON checktt_users(thread_id, week DESC);
             CREATE INDEX IF NOT EXISTS idx_checktt_month ON checktt_users(thread_id, month DESC);
             CREATE INDEX IF NOT EXISTS idx_checktt_total ON checktt_users(thread_id, total DESC);
+
+            CREATE TABLE IF NOT EXISTS checktt_noti_slots (
+                thread_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                slot_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER,
+                error TEXT,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (thread_id, type, slot_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_checktt_noti_slots_status
+                ON checktt_noti_slots(status, updated_at);
 
             CREATE TABLE IF NOT EXISTS money_users (
                 thread_id TEXT NOT NULL,
@@ -509,6 +526,73 @@ class BotDatabase {
             `).run(period || null, Date.now(), String(threadID));
         });
         tx();
+        return true;
+    }
+
+    claimCheckttNotiSlot(threadID, type, slotKey, options = {}) {
+        if (!RESET_COLUMNS.has(type) || !slotKey) return false;
+        const now = Number(options.now || Date.now());
+        const lockMs = Number(options.lockMs || 2 * 60 * 1000);
+        const maxAttempts = Number(options.maxAttempts || 3);
+
+        const tx = this.db.transaction(() => {
+            const row = this.db.prepare(`
+                SELECT status, attempts, next_retry_at, updated_at
+                FROM checktt_noti_slots
+                WHERE thread_id = ? AND type = ? AND slot_key = ?
+            `).get(String(threadID), type, String(slotKey));
+
+            if (!row) {
+                this.db.prepare(`
+                    INSERT INTO checktt_noti_slots(thread_id, type, slot_key, status, attempts, next_retry_at, error, updated_at)
+                    VALUES(?, ?, ?, 'sending', 1, NULL, NULL, ?)
+                `).run(String(threadID), type, String(slotKey), now);
+                return true;
+            }
+
+            if (row.status === 'sent' || row.status === 'skipped' || row.status === 'failed_final') {
+                return false;
+            }
+
+            if (row.status === 'sending' && now - Number(row.updated_at || 0) < lockMs) {
+                return false;
+            }
+
+            if (row.status === 'failed') {
+                if (Number(row.attempts || 0) >= maxAttempts) return false;
+                if (Number(row.next_retry_at || 0) > now) return false;
+            }
+
+            this.db.prepare(`
+                UPDATE checktt_noti_slots
+                SET status = 'sending',
+                    attempts = attempts + 1,
+                    next_retry_at = NULL,
+                    error = NULL,
+                    updated_at = ?
+                WHERE thread_id = ? AND type = ? AND slot_key = ?
+            `).run(now, String(threadID), type, String(slotKey));
+            return true;
+        });
+
+        return tx();
+    }
+
+    setCheckttNotiSlotStatus(threadID, type, slotKey, status, options = {}) {
+        if (!RESET_COLUMNS.has(type) || !slotKey) return false;
+        const now = Number(options.now || Date.now());
+        const nextRetryAt = options.nextRetryAt == null ? null : Number(options.nextRetryAt);
+        const error = options.error == null ? null : String(options.error);
+
+        this.db.prepare(`
+            INSERT INTO checktt_noti_slots(thread_id, type, slot_key, status, attempts, next_retry_at, error, updated_at)
+            VALUES(?, ?, ?, ?, 1, ?, ?, ?)
+            ON CONFLICT(thread_id, type, slot_key) DO UPDATE SET
+                status = excluded.status,
+                next_retry_at = excluded.next_retry_at,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+        `).run(String(threadID), type, String(slotKey), String(status), nextRetryAt, error, now);
         return true;
     }
 

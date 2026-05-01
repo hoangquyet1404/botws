@@ -9,7 +9,7 @@ module.exports = function ({ api }) {
   return async function ({ event }) {
     const dateNow = Date.now();
     const time = moment.tz("Asia/Ho_Chi_minh").format("HH:MM:ss DD/MM/YYYY");
-    const { allowInbox, PREFIX, ADMINBOT, NDH, DeveloperMode, adminOnly } = global.config;
+    const { allowInbox, PREFIX, ADMINBOT, NDH, DeveloperMode, adminOnly, ndhOnly } = global.config;
     // const PREFIX = prefix || global.config.PREFIX || "!";
     const { commands, cd } = global.concac;
     if (event?.isE2EE && typeof api.rememberE2EEEvent === 'function') {
@@ -51,6 +51,9 @@ module.exports = function ({ api }) {
 
     let dataAdbox = store.getJson('dataAdbox', 'default', { adminbox: {} });
 
+    if (typeof body === 'string' && body.startsWith(prefixbox) && !NDH.includes(senderID) && ndhOnly == true) {
+      return api.sendMessage('[ WARNING ] - Hiện tại đang bật chế độ NDHOnly chỉ NDH mới được sử dụng bot!!!', threadID, null, messageID);
+    }
     if (typeof body === 'string' && body.startsWith(prefixbox) && !NDH.includes(senderID) && !ADMINBOT.includes(senderID) && adminOnly == true) {
       return api.sendMessage('[ WARNING ] - Hiện tại đang bật chế độ AdminOnly chỉ ADMIN mới được sử dụng bot!!!', threadID, null, messageID);
     }
@@ -105,6 +108,9 @@ module.exports = function ({ api }) {
       commandName = args.shift()?.toLowerCase();
       command = commands.get(commandName);
       if (command && command.config) {
+        if (typeof body === 'string' && !body.startsWith(prefixbox) && command.config.hasPrefix === false && !NDH.includes(senderID) && ndhOnly == true) {
+          return api.sendMessage('[ WARNING ] - Hiện tại đang bật chế độ NDHOnly chỉ NDH mới được sử dụng bot!!!', threadID, null, messageID);
+        }
         if (typeof body === 'string' && !body.startsWith(prefixbox) && command.config.hasPrefix === false && !NDH.includes(senderID) && !ADMINBOT.includes(senderID) && adminOnly == true) {
           return api.sendMessage('[ WARNING ] - Hiện tại đang bật chế độ AdminOnly chỉ ADMIN mới được sử dụng bot!!!', threadID, null, messageID);
         }

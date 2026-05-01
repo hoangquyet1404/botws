@@ -4,10 +4,11 @@
     "allowInbox": false,
     "DeveloperMode": false,
     "adminOnly": false,
+    "ndhOnly": false,
     "BOTNAME": "Neo Bot",
     "api": {
         "url": "https://api.khotools.com",
-        "key": "",
+        "key": "sk_test__i5RH1a0LR3oiLVcgowDujSf6_9JoIbN",
         "fca": "fcaPrime"
     },
     "token": "",
